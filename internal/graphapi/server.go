@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -22,6 +23,7 @@ import (
 )
 
 const maxBodyBytes = 1 << 20
+const categoryTagPrefix = "graph-category-"
 
 type Mailpit interface {
 	List(ctx context.Context, start, limit int) (mailpit.ListResponse, error)
@@ -362,7 +364,12 @@ func (s *Server) patch(w http.ResponseWriter, r *http.Request, id string) {
 		}
 	}
 	if body.Categories != nil {
-		if err := s.mp.SetTags(r.Context(), id, body.Categories); err != nil {
+		current, err := s.findSummary(r, id)
+		if err != nil {
+			s.upstreamError(w, err)
+			return
+		}
+		if err := s.mp.SetTags(r.Context(), id, replaceCategoryTags(current.Tags, body.Categories)); err != nil {
 			s.upstreamError(w, err)
 			return
 		}
@@ -418,7 +425,7 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request, mailbox string, 
 		graphError(w, http.StatusBadRequest, "ErrorInvalidRecipients", "At least one recipient is required")
 		return
 	}
-	tags := append([]string(nil), m.Categories...)
+	tags := categoryTags(m.Categories)
 	if draft {
 		tags = append(tags, "graph-draft")
 	} else {
@@ -468,7 +475,7 @@ func summaryToGraph(m mailpit.MessageSummary, headers map[string][]string, paren
 		"id": m.ID, "internetMessageId": m.MessageID, "conversationId": conversation,
 		"subject": m.Subject, "bodyPreview": m.Snippet, "receivedDateTime": m.Created,
 		"sentDateTime": m.Created, "isRead": m.Read, "hasAttachments": m.Attachments > 0,
-		"categories": m.Tags, "parentFolderId": parentFolderID, "flag": map[string]string{"flagStatus": "notFlagged"},
+		"categories": categoriesFromTags(m.Tags), "parentFolderId": parentFolderID, "flag": map[string]string{"flagStatus": "notFlagged"},
 		"internetMessageHeaders": graphHeaderList(headers), "from": graphAddress(m.From), "sender": graphAddress(m.From),
 		"toRecipients": graphAddresses(m.To), "ccRecipients": graphAddresses(m.Cc), "bccRecipients": graphAddresses(m.Bcc),
 	}
@@ -480,7 +487,7 @@ func fullToGraph(m mailpit.Message, headers map[string][]string) map[string]any 
 		bodyType, body = "html", m.HTML
 	}
 	conversation := conversationIDFor(m.MessageID, headers)
-	out := map[string]any{"id": m.ID, "internetMessageId": m.MessageID, "conversationId": conversation, "subject": m.Subject, "body": map[string]string{"contentType": bodyType, "content": body}, "bodyPreview": preview(m.Text), "receivedDateTime": m.Date, "sentDateTime": m.Date, "hasAttachments": len(m.Attachments) > 0, "categories": m.Tags, "from": graphAddress(m.From), "sender": graphAddress(m.From), "toRecipients": graphAddresses(m.To), "ccRecipients": graphAddresses(m.Cc), "bccRecipients": graphAddresses(m.Bcc), "replyTo": graphAddresses(m.ReplyTo)}
+	out := map[string]any{"id": m.ID, "internetMessageId": m.MessageID, "conversationId": conversation, "subject": m.Subject, "body": map[string]string{"contentType": bodyType, "content": body}, "bodyPreview": preview(m.Text), "receivedDateTime": m.Date, "sentDateTime": m.Date, "hasAttachments": len(m.Attachments) > 0, "categories": categoriesFromTags(m.Tags), "from": graphAddress(m.From), "sender": graphAddress(m.From), "toRecipients": graphAddresses(m.To), "ccRecipients": graphAddresses(m.Cc), "bccRecipients": graphAddresses(m.Bcc), "replyTo": graphAddresses(m.ReplyTo)}
 	out["internetMessageHeaders"] = graphHeaderList(headers)
 	return out
 }
@@ -566,6 +573,40 @@ func hasTag(tags []string, wanted string) bool {
 		}
 	}
 	return false
+}
+
+func categoryTags(categories []string) []string {
+	out := make([]string, 0, len(categories))
+	for _, category := range categories {
+		if category = strings.TrimSpace(category); category != "" {
+			out = append(out, categoryTagPrefix+base64.RawURLEncoding.EncodeToString([]byte(category)))
+		}
+	}
+	return unique(out)
+}
+
+func categoriesFromTags(tags []string) []string {
+	var out []string
+	for _, tag := range tags {
+		if !strings.HasPrefix(tag, categoryTagPrefix) {
+			continue
+		}
+		raw, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(tag, categoryTagPrefix))
+		if err == nil && len(raw) > 0 {
+			out = append(out, string(raw))
+		}
+	}
+	return unique(out)
+}
+
+func replaceCategoryTags(tags, categories []string) []string {
+	out := make([]string, 0, len(tags)+len(categories))
+	for _, tag := range tags {
+		if !strings.HasPrefix(tag, categoryTagPrefix) {
+			out = append(out, tag)
+		}
+	}
+	return unique(append(out, categoryTags(categories)...))
 }
 func unique(in []string) []string {
 	seen := map[string]bool{}

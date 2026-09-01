@@ -21,7 +21,11 @@ type fakeMailpit struct {
 }
 
 func (f *fakeMailpit) List(context.Context, int, int) (mailpit.ListResponse, error) {
-	return mailpit.ListResponse{Messages: f.messages, MessagesCount: len(f.messages)}, nil
+	messages := append([]mailpit.MessageSummary(nil), f.messages...)
+	for i := range messages {
+		messages[i].Tags = append([]string(nil), f.tags...)
+	}
+	return mailpit.ListResponse{Messages: messages, MessagesCount: len(messages)}, nil
 }
 func (f *fakeMailpit) Get(_ context.Context, id string) (mailpit.Message, error) {
 	return mailpit.Message{ID: id, MessageID: "<one@example.test>", From: mailpit.Address{Address: "sender@example.test"}, To: []mailpit.Address{{Address: "box@example.test"}}, Subject: "Hello", Text: "Body", Date: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC), Tags: f.tags}, nil
@@ -106,8 +110,20 @@ func TestPatchReadAndCategories(t *testing.T) {
 	r.Header.Set("Authorization", "Bearer secret")
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
-	if w.Code != http.StatusOK || fake.read == nil || !*fake.read || len(fake.tags) != 1 || fake.tags[0] != "done" {
+	if w.Code != http.StatusOK || fake.read == nil || !*fake.read || len(categoriesFromTags(fake.tags)) != 1 || categoriesFromTags(fake.tags)[0] != "done" {
 		t.Fatalf("response=%d read=%v tags=%v", w.Code, fake.read, fake.tags)
+	}
+}
+
+func TestCategoriesRoundTripUnicodeThroughMailpitSafeTags(t *testing.T) {
+	categories := []string{"Traité par IA", "À traiter par un humain"}
+	tags := replaceCategoryTags([]string{"graph-draft", "operator-tag"}, categories)
+	got := categoriesFromTags(tags)
+	if len(got) != len(categories) || got[0] != categories[0] || got[1] != categories[1] {
+		t.Fatalf("categories = %v, want %v (tags=%v)", got, categories, tags)
+	}
+	if !hasTag(tags, "graph-draft") || !hasTag(tags, "operator-tag") {
+		t.Fatalf("non-category tags were lost: %v", tags)
 	}
 }
 
