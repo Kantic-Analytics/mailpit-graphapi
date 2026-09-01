@@ -12,6 +12,7 @@ base is `/v1.0`; `{user}` is an email address and `{id}` is a Mailpit database I
 | `GET /users/{user}/messages/{id}` | Supported | message + headers |
 | `GET /users/{user}/messages/{id}/$value` | Supported | raw RFC 822 source |
 | `PATCH /users/{user}/messages/{id}` | Supported | read state and tags |
+| `POST /users/{user}/messages/{id}/move` | Supported | inbox, drafts, sentitems |
 | `POST /users/{user}/messages` | Supported | captured message tagged `graph-draft` |
 | `POST /users/{user}/sendMail` | Supported | captured message tagged `graph-sent` |
 

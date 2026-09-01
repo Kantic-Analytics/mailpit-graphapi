@@ -139,6 +139,8 @@ func (s *Server) graph(w http.ResponseWriter, r *http.Request) {
 		s.raw(w, r, tail[1])
 	case len(tail) == 2 && tail[0] == "messages" && r.Method == http.MethodPatch:
 		s.patch(w, r, tail[1])
+	case len(tail) == 3 && tail[0] == "messages" && tail[2] == "move" && r.Method == http.MethodPost:
+		s.move(w, r, tail[1])
 	case len(tail) == 1 && tail[0] == "messages" && r.Method == http.MethodPost:
 		s.create(w, r, mailbox, true)
 	case len(tail) == 1 && tail[0] == "sendMail" && r.Method == http.MethodPost:
@@ -146,6 +148,61 @@ func (s *Server) graph(w http.ResponseWriter, r *http.Request) {
 	default:
 		graphError(w, http.StatusNotFound, "Request_ResourceNotFound", "Unknown endpoint")
 	}
+}
+
+func (s *Server) move(w http.ResponseWriter, r *http.Request, id string) {
+	var input struct {
+		DestinationID string `json:"destinationId"`
+	}
+	if err := decodeBody(w, r, &input); err != nil {
+		return
+	}
+	folder := normalizedFolder(input.DestinationID)
+	if folder == "" {
+		graphError(w, http.StatusNotFound, "ErrorItemNotFound", "Only inbox, drafts, and sentitems are supported")
+		return
+	}
+	message, err := s.mp.Get(r.Context(), id)
+	if err != nil {
+		s.upstreamError(w, err)
+		return
+	}
+	tags := withoutFolderTags(message.Tags)
+	switch folder {
+	case "drafts":
+		tags = append(tags, "graph-draft")
+	case "sentitems":
+		tags = append(tags, "graph-sent")
+	}
+	if err := s.mp.SetTags(r.Context(), id, unique(tags)); err != nil {
+		s.upstreamError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"id": id, "parentFolderId": folder})
+}
+
+func normalizedFolder(folder string) string {
+	switch strings.ToLower(strings.TrimSpace(folder)) {
+	case "inbox":
+		return "inbox"
+	case "drafts":
+		return "drafts"
+	case "sentitems", "sent items":
+		return "sentitems"
+	default:
+		return ""
+	}
+}
+
+func withoutFolderTags(tags []string) []string {
+	out := make([]string, 0, len(tags))
+	for _, tag := range tags {
+		if hasTag([]string{tag}, "graph-draft") || hasTag([]string{tag}, "graph-sent") {
+			continue
+		}
+		out = append(out, tag)
+	}
+	return out
 }
 
 func (s *Server) folder(w http.ResponseWriter, r *http.Request, mailbox, folder string) {

@@ -15,6 +15,7 @@ email to the internet.
 - lists Inbox, Drafts and Sent Items messages;
 - exposes message metadata and raw RFC 822 content;
 - maps Graph `isRead` and `categories` to Mailpit read state and tags;
+- simulates message moves between Inbox, Drafts and Sent Items;
 - captures Graph `sendMail` calls and draft creation in Mailpit;
 - never contacts Microsoft Graph and never relays mail itself.
 

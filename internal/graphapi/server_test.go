@@ -110,3 +110,33 @@ func TestPatchReadAndCategories(t *testing.T) {
 		t.Fatalf("response=%d read=%v tags=%v", w.Code, fake.read, fake.tags)
 	}
 }
+
+func TestMoveMessageToInboxPreservesCategories(t *testing.T) {
+	fake := &fakeMailpit{tags: []string{"Traitement IA en cours", "graph-draft"}}
+	h := New(fake, Config{Token: "secret"}).Handler()
+	r := httptest.NewRequest(http.MethodPost, "/v1.0/users/box@example.test/messages/id-1/move", strings.NewReader(`{"destinationId":"inbox"}`))
+	r.Header.Set("Authorization", "Bearer secret")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("response=%d body=%s", w.Code, w.Body.String())
+	}
+	if len(fake.tags) != 1 || fake.tags[0] != "Traitement IA en cours" {
+		t.Fatalf("folder tags were not isolated from categories: %v", fake.tags)
+	}
+	if !strings.Contains(w.Body.String(), `"id":"id-1"`) || !strings.Contains(w.Body.String(), `"parentFolderId":"inbox"`) {
+		t.Fatalf("unexpected response: %s", w.Body.String())
+	}
+}
+
+func TestMoveMessageRejectsUnsupportedFolder(t *testing.T) {
+	h := New(&fakeMailpit{}, Config{Token: "secret"}).Handler()
+	r := httptest.NewRequest(http.MethodPost, "/v1.0/users/box@example.test/messages/id-1/move", strings.NewReader(`{"destinationId":"SAV"}`))
+	r.Header.Set("Authorization", "Bearer secret")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("got %d, want %d", w.Code, http.StatusNotFound)
+	}
+}
