@@ -47,6 +47,14 @@ func main() {
 	if err != nil {
 		fatal(err.Error())
 	}
+	reconcileCtx, cancelReconcile := context.WithTimeout(context.Background(), 30*time.Second)
+	updated, reconcileErr := graphapi.ReconcileDisplayTags(reconcileCtx, mp)
+	cancelReconcile()
+	if reconcileErr != nil {
+		slog.Warn("Mailpit display-tag reconciliation failed", "error", reconcileErr)
+	} else {
+		slog.Info("Mailpit display tags reconciled", "messages_updated", updated)
+	}
 	handler := graphapi.New(mp, graphapi.Config{
 		Token: *token, ClientID: *clientID, ClientSecret: *clientSecret, Folders: splitCSV(*folders),
 	}).Handler()

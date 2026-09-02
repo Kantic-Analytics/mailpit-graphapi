@@ -19,7 +19,9 @@ base is `/v1.0`; `{user}` is an email address and `{id}` is a Mailpit database I
 
 Built-in folders are `inbox`, `drafts`, and `sentitems`. Additional top-level
 folders are configured with `MAILPIT_GRAPH_FOLDERS` and stored as UTF-8-safe
-Mailpit tags. The message list honors
+Mailpit tags. Reversible Base64URL tags are accompanied by human-readable ASCII
+tags in the Mailpit UI; those display tags are never exposed as Graph
+categories. The message list honors
 `$top`, `$skip`, ascending `$orderby`, `receivedDateTime ge ...`, and
 `conversationId eq '...'`. Other OData expressions are ignored.
 
