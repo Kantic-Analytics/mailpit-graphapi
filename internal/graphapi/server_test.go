@@ -2,6 +2,7 @@ package graphapi
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -14,10 +15,11 @@ import (
 )
 
 type fakeMailpit struct {
-	messages []mailpit.MessageSummary
-	sent     mailpit.SendRequest
-	read     *bool
-	tags     []string
+	messages  []mailpit.MessageSummary
+	sent      mailpit.SendRequest
+	read      *bool
+	tags      []string
+	tagWrites int
 }
 
 func (f *fakeMailpit) List(context.Context, int, int) (mailpit.ListResponse, error) {
@@ -42,6 +44,7 @@ func (f *fakeMailpit) SetRead(_ context.Context, _ string, value bool) error {
 }
 func (f *fakeMailpit) SetTags(_ context.Context, _ string, tags []string) error {
 	f.tags = tags
+	f.tagWrites++
 	return nil
 }
 func (f *fakeMailpit) Send(_ context.Context, m mailpit.SendRequest) (string, error) {
@@ -125,6 +128,31 @@ func TestCategoriesRoundTripUnicodeThroughMailpitSafeTags(t *testing.T) {
 	if !hasTag(tags, "graph-draft") || !hasTag(tags, "operator-tag") {
 		t.Fatalf("non-category tags were lost: %v", tags)
 	}
+	if !hasTag(tags, "Categorie - Traite par IA") || !hasTag(tags, "Categorie - A traiter par un humain") {
+		t.Fatalf("human-readable category tags missing: %v", tags)
+	}
+}
+
+func TestReconcileDisplayTagsUpgradesExistingMessages(t *testing.T) {
+	encodedCategory := categoryTagPrefix + base64.RawURLEncoding.EncodeToString([]byte("À traiter par un humain"))
+	fake := &fakeMailpit{
+		messages: []mailpit.MessageSummary{{ID: "id-1"}},
+		tags:     []string{encodedCategory, folderTag("SAV")},
+	}
+
+	updated, err := ReconcileDisplayTags(context.Background(), fake)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated != 1 || fake.tagWrites != 1 {
+		t.Fatalf("updated=%d writes=%d", updated, fake.tagWrites)
+	}
+	if !hasTag(fake.tags, "Categorie - A traiter par un humain") || !hasTag(fake.tags, "Dossier - SAV") {
+		t.Fatalf("display tags missing after reconciliation: %v", fake.tags)
+	}
+	if got := categoriesFromTags(fake.tags); len(got) != 1 || got[0] != "À traiter par un humain" {
+		t.Fatalf("Graph category changed during reconciliation: %v", got)
+	}
 }
 
 func TestMoveMessageToInboxPreservesCategories(t *testing.T) {
@@ -178,7 +206,7 @@ func TestCustomFoldersAreListedAndMessagesCanMoveIntoThem(t *testing.T) {
 	}
 
 	moved := request(http.MethodPost, "/v1.0/users/box@example.test/messages/id-1/move", `{"destinationId":"SAV"}`)
-	if moved.Code != http.StatusCreated || !hasTag(fake.tags, folderTag("SAV")) {
+	if moved.Code != http.StatusCreated || !hasTag(fake.tags, folderTag("SAV")) || !hasTag(fake.tags, "Dossier - SAV") {
 		t.Fatalf("move: %d %s tags=%v", moved.Code, moved.Body.String(), fake.tags)
 	}
 
@@ -202,6 +230,9 @@ func TestMovingBetweenCustomFoldersPreservesCategories(t *testing.T) {
 
 	if w.Code != http.StatusCreated || !hasTag(fake.tags, folderTag("SAV")) || hasTag(fake.tags, folderTag("SUIVI")) {
 		t.Fatalf("move response=%d tags=%v", w.Code, fake.tags)
+	}
+	if !hasTag(fake.tags, "Dossier - SAV") || hasTag(fake.tags, "Dossier - SUIVI") {
+		t.Fatalf("readable folder tags were not replaced: %v", fake.tags)
 	}
 	got := categoriesFromTags(fake.tags)
 	if len(got) != 1 || got[0] != "Traitement IA en cours" {

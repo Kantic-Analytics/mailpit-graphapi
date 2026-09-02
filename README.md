@@ -17,6 +17,8 @@ email to the internet.
 - maps Graph `isRead` and `categories` to Mailpit read state and tags;
 - simulates message moves between Inbox, Drafts and Sent Items;
 - simulates configurable application folders through Mailpit tags;
+- adds ASCII display tags such as `Categorie - A traiter par un humain` and
+  `Dossier - SAV` while retaining reversible UTF-8-safe tags for Graph;
 - captures Graph `sendMail` calls and draft creation in Mailpit;
 - never contacts Microsoft Graph and never relays mail itself.
 

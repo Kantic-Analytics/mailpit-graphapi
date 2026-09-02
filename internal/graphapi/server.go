@@ -25,6 +25,8 @@ import (
 const maxBodyBytes = 1 << 20
 const categoryTagPrefix = "graph-category-"
 const folderTagPrefix = "graph-folder-"
+const categoryDisplayTagPrefix = "Categorie - "
+const folderDisplayTagPrefix = "Dossier - "
 
 type Mailpit interface {
 	List(ctx context.Context, start, limit int) (mailpit.ListResponse, error)
@@ -61,6 +63,33 @@ func New(mp Mailpit, cfg Config) *Server {
 	}
 	return &Server{mp: mp, token: cfg.Token, client: cfg.ClientID, secret: cfg.ClientSecret,
 		folders: normalizedCustomFolders(cfg.Folders), log: logger}
+}
+
+// ReconcileDisplayTags upgrades messages created by older sidecar versions.
+// Reversible tags remain authoritative; readable tags are rebuilt from them.
+func ReconcileDisplayTags(ctx context.Context, mp Mailpit) (int, error) {
+	const pageSize = 1000
+	updated := 0
+	for start := 0; ; {
+		page, err := mp.List(ctx, start, pageSize)
+		if err != nil {
+			return updated, err
+		}
+		for _, message := range page.Messages {
+			tags := withDisplayTags(message.Tags)
+			if equalStrings(tags, message.Tags) {
+				continue
+			}
+			if err := mp.SetTags(ctx, message.ID, tags); err != nil {
+				return updated, err
+			}
+			updated++
+		}
+		if len(page.Messages) < pageSize {
+			return updated, nil
+		}
+		start += len(page.Messages)
+	}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -183,7 +212,7 @@ func (s *Server) move(w http.ResponseWriter, r *http.Request, id string) {
 		tags = append(tags, "graph-sent")
 	case "inbox":
 	default:
-		tags = append(tags, folderTag(folder))
+		tags = append(tags, folderTag(folder), folderDisplayTag(folder))
 	}
 	if err := s.mp.SetTags(r.Context(), id, unique(tags)); err != nil {
 		s.upstreamError(w, err)
@@ -213,7 +242,7 @@ func withoutFolderTags(tags []string) []string {
 	out := make([]string, 0, len(tags))
 	for _, tag := range tags {
 		if hasTag([]string{tag}, "graph-draft") || hasTag([]string{tag}, "graph-sent") ||
-			strings.HasPrefix(tag, folderTagPrefix) {
+			strings.HasPrefix(tag, folderTagPrefix) || strings.HasPrefix(tag, folderDisplayTagPrefix) {
 			continue
 		}
 		out = append(out, tag)
@@ -638,6 +667,14 @@ func folderTag(folder string) string {
 	return folderTagPrefix + base64.RawURLEncoding.EncodeToString([]byte(folder))
 }
 
+func folderDisplayTag(folder string) string {
+	label := asciiDisplayLabel(folder)
+	if label == "" {
+		return ""
+	}
+	return folderDisplayTagPrefix + label
+}
+
 func folderFromTag(tag string) (string, bool) {
 	if !strings.HasPrefix(tag, folderTagPrefix) {
 		return "", false
@@ -659,10 +696,13 @@ func hasTag(tags []string, wanted string) bool {
 }
 
 func categoryTags(categories []string) []string {
-	out := make([]string, 0, len(categories))
+	out := make([]string, 0, 2*len(categories))
 	for _, category := range categories {
 		if category = strings.TrimSpace(category); category != "" {
 			out = append(out, categoryTagPrefix+base64.RawURLEncoding.EncodeToString([]byte(category)))
+			if label := asciiDisplayLabel(category); label != "" {
+				out = append(out, categoryDisplayTagPrefix+label)
+			}
 		}
 	}
 	return unique(out)
@@ -685,11 +725,83 @@ func categoriesFromTags(tags []string) []string {
 func replaceCategoryTags(tags, categories []string) []string {
 	out := make([]string, 0, len(tags)+len(categories))
 	for _, tag := range tags {
-		if !strings.HasPrefix(tag, categoryTagPrefix) {
+		if !strings.HasPrefix(tag, categoryTagPrefix) && !strings.HasPrefix(tag, categoryDisplayTagPrefix) {
 			out = append(out, tag)
 		}
 	}
 	return unique(append(out, categoryTags(categories)...))
+}
+
+func withDisplayTags(tags []string) []string {
+	out := make([]string, 0, len(tags)+2)
+	for _, tag := range tags {
+		if strings.HasPrefix(tag, categoryDisplayTagPrefix) || strings.HasPrefix(tag, folderDisplayTagPrefix) {
+			continue
+		}
+		out = append(out, tag)
+	}
+	for _, category := range categoriesFromTags(tags) {
+		if label := asciiDisplayLabel(category); label != "" {
+			out = append(out, categoryDisplayTagPrefix+label)
+		}
+	}
+	for _, tag := range tags {
+		if folder, ok := folderFromTag(tag); ok {
+			if label := asciiDisplayLabel(folder); label != "" {
+				out = append(out, folderDisplayTagPrefix+label)
+			}
+		}
+	}
+	return unique(out)
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// asciiDisplayLabel produces a Mailpit-safe, human-readable companion label.
+// The reversible Base64URL tag remains authoritative; this value exists only
+// for operators looking at the Mailpit UI.
+func asciiDisplayLabel(value string) string {
+	value = strings.NewReplacer(
+		"À", "A", "Á", "A", "Â", "A", "Ã", "A", "Ä", "A", "Å", "A",
+		"à", "a", "á", "a", "â", "a", "ã", "a", "ä", "a", "å", "a",
+		"Ç", "C", "ç", "c",
+		"È", "E", "É", "E", "Ê", "E", "Ë", "E",
+		"è", "e", "é", "e", "ê", "e", "ë", "e",
+		"Ì", "I", "Í", "I", "Î", "I", "Ï", "I",
+		"ì", "i", "í", "i", "î", "i", "ï", "i",
+		"Ñ", "N", "ñ", "n",
+		"Ò", "O", "Ó", "O", "Ô", "O", "Õ", "O", "Ö", "O",
+		"ò", "o", "ó", "o", "ô", "o", "õ", "o", "ö", "o",
+		"Ù", "U", "Ú", "U", "Û", "U", "Ü", "U",
+		"ù", "u", "ú", "u", "û", "u", "ü", "u",
+		"Ý", "Y", "Ÿ", "Y", "ý", "y", "ÿ", "y",
+	).Replace(strings.TrimSpace(value))
+
+	var out strings.Builder
+	space := false
+	for _, r := range value {
+		switch {
+		case r >= 'A' && r <= 'Z', r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '_', r == '-':
+			if space && out.Len() > 0 {
+				out.WriteByte(' ')
+			}
+			space = false
+			out.WriteRune(r)
+		default:
+			space = true
+		}
+	}
+	return strings.TrimSpace(out.String())
 }
 func unique(in []string) []string {
 	seen := map[string]bool{}
