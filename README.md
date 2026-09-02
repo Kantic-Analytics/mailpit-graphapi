@@ -16,6 +16,7 @@ email to the internet.
 - exposes message metadata and raw RFC 822 content;
 - maps Graph `isRead` and `categories` to Mailpit read state and tags;
 - simulates message moves between Inbox, Drafts and Sent Items;
+- simulates configurable application folders through Mailpit tags;
 - captures Graph `sendMail` calls and draft creation in Mailpit;
 - never contacts Microsoft Graph and never relays mail itself.
 
@@ -65,6 +66,7 @@ Flags have equivalent environment variables:
 | `--token` | `MAILPIT_GRAPH_TOKEN` | bearer token returned by local OAuth |
 | `--client-id` | `MAILPIT_GRAPH_CLIENT_ID` | optional required client ID |
 | `--client-secret` | `MAILPIT_GRAPH_CLIENT_SECRET` | optional required client secret |
+| `--folders` | `MAILPIT_GRAPH_FOLDERS` | comma-separated application folders |
 
 Remote Mailpit URLs are rejected by default. For an isolated container network,
 pass `--allow-remote-mailpit` explicitly.

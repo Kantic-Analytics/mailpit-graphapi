@@ -27,6 +27,7 @@ func main() {
 	token := flag.String("token", env("MAILPIT_GRAPH_TOKEN", "mailpit-graphapi-local"), "local bearer token")
 	clientID := flag.String("client-id", env("MAILPIT_GRAPH_CLIENT_ID", ""), "optional OAuth client ID")
 	clientSecret := flag.String("client-secret", env("MAILPIT_GRAPH_CLIENT_SECRET", ""), "optional OAuth client secret")
+	folders := flag.String("folders", env("MAILPIT_GRAPH_FOLDERS", ""), "comma-separated custom mail folders")
 	allowRemote := flag.Bool("allow-remote-mailpit", false, "allow a non-loopback Mailpit URL (needed for containers)")
 	showVersion := flag.Bool("version", false, "print version")
 	flag.Parse()
@@ -46,7 +47,9 @@ func main() {
 	if err != nil {
 		fatal(err.Error())
 	}
-	handler := graphapi.New(mp, graphapi.Config{Token: *token, ClientID: *clientID, ClientSecret: *clientSecret}).Handler()
+	handler := graphapi.New(mp, graphapi.Config{
+		Token: *token, ClientID: *clientID, ClientSecret: *clientSecret, Folders: splitCSV(*folders),
+	}).Handler()
 	srv := &http.Server{
 		Addr:              *listen,
 		Handler:           handler,
@@ -76,6 +79,16 @@ func env(name, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func splitCSV(raw string) []string {
+	var out []string
+	for _, value := range strings.Split(raw, ",") {
+		if value = strings.TrimSpace(value); value != "" {
+			out = append(out, value)
+		}
+	}
+	return out
 }
 
 func isLoopbackURL(raw string) bool {

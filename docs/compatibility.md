@@ -6,7 +6,8 @@ base is `/v1.0`; `{user}` is an email address and `{id}` is a Mailpit database I
 | Graph route | Status | Mailpit mapping |
 |---|---|---|
 | `POST /{tenant}/oauth2/v2.0/token` | Supported | local static bearer token |
-| `GET /users/{user}/mailFolders/inbox` | Supported | computed unread count |
+| `GET /users/{user}/mailFolders` | Supported | well-known and configured folder list |
+| `GET /users/{user}/mailFolders/{folder}` | Supported | computed unread count |
 | `GET /users/{user}/mailFolders/{folder}/messages` | Supported | messages/tags |
 | `GET /users/{user}/messages` | Supported | messages addressed to/from user |
 | `GET /users/{user}/messages/{id}` | Supported | message + headers |
@@ -16,7 +17,9 @@ base is `/v1.0`; `{user}` is an email address and `{id}` is a Mailpit database I
 | `POST /users/{user}/messages` | Supported | captured message tagged `graph-draft` |
 | `POST /users/{user}/sendMail` | Supported | captured message tagged `graph-sent` |
 
-Supported folders are `inbox`, `drafts`, and `sentitems`. The message list honors
+Built-in folders are `inbox`, `drafts`, and `sentitems`. Additional top-level
+folders are configured with `MAILPIT_GRAPH_FOLDERS` and stored as UTF-8-safe
+Mailpit tags. The message list honors
 `$top`, `$skip`, ascending `$orderby`, `receivedDateTime ge ...`, and
 `conversationId eq '...'`. Other OData expressions are ignored.
 

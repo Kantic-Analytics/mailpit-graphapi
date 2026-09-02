@@ -24,6 +24,7 @@ import (
 
 const maxBodyBytes = 1 << 20
 const categoryTagPrefix = "graph-category-"
+const folderTagPrefix = "graph-folder-"
 
 type Mailpit interface {
 	List(ctx context.Context, start, limit int) (mailpit.ListResponse, error)
@@ -40,15 +41,17 @@ type Config struct {
 	Token        string
 	ClientID     string
 	ClientSecret string
+	Folders      []string
 	Logger       *slog.Logger
 }
 
 type Server struct {
-	mp     Mailpit
-	token  string
-	client string
-	secret string
-	log    *slog.Logger
+	mp      Mailpit
+	token   string
+	client  string
+	secret  string
+	folders []string
+	log     *slog.Logger
 }
 
 func New(mp Mailpit, cfg Config) *Server {
@@ -56,7 +59,8 @@ func New(mp Mailpit, cfg Config) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Server{mp: mp, token: cfg.Token, client: cfg.ClientID, secret: cfg.ClientSecret, log: logger}
+	return &Server{mp: mp, token: cfg.Token, client: cfg.ClientID, secret: cfg.ClientSecret,
+		folders: normalizedCustomFolders(cfg.Folders), log: logger}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -129,6 +133,8 @@ func (s *Server) graph(w http.ResponseWriter, r *http.Request) {
 	}
 	tail := parts[3:]
 	switch {
+	case len(tail) == 1 && tail[0] == "mailFolders" && r.Method == http.MethodGet:
+		s.folderList(w, mailbox)
 	case len(tail) == 2 && tail[0] == "mailFolders" && r.Method == http.MethodGet:
 		s.folder(w, r, mailbox, tail[1])
 	case len(tail) == 3 && tail[0] == "mailFolders" && tail[2] == "messages" && r.Method == http.MethodGet:
@@ -159,9 +165,9 @@ func (s *Server) move(w http.ResponseWriter, r *http.Request, id string) {
 	if err := decodeBody(w, r, &input); err != nil {
 		return
 	}
-	folder := normalizedFolder(input.DestinationID)
+	folder := s.normalizedFolder(input.DestinationID)
 	if folder == "" {
-		graphError(w, http.StatusNotFound, "ErrorItemNotFound", "Only inbox, drafts, and sentitems are supported")
+		graphError(w, http.StatusNotFound, "ErrorItemNotFound", "Unknown mail folder")
 		return
 	}
 	message, err := s.mp.Get(r.Context(), id)
@@ -175,6 +181,9 @@ func (s *Server) move(w http.ResponseWriter, r *http.Request, id string) {
 		tags = append(tags, "graph-draft")
 	case "sentitems":
 		tags = append(tags, "graph-sent")
+	case "inbox":
+	default:
+		tags = append(tags, folderTag(folder))
 	}
 	if err := s.mp.SetTags(r.Context(), id, unique(tags)); err != nil {
 		s.upstreamError(w, err)
@@ -183,7 +192,7 @@ func (s *Server) move(w http.ResponseWriter, r *http.Request, id string) {
 	writeJSON(w, http.StatusCreated, map[string]any{"id": id, "parentFolderId": folder})
 }
 
-func normalizedFolder(folder string) string {
+func (s *Server) normalizedFolder(folder string) string {
 	switch strings.ToLower(strings.TrimSpace(folder)) {
 	case "inbox":
 		return "inbox"
@@ -191,15 +200,20 @@ func normalizedFolder(folder string) string {
 		return "drafts"
 	case "sentitems", "sent items":
 		return "sentitems"
-	default:
-		return ""
 	}
+	for _, custom := range s.folders {
+		if strings.EqualFold(custom, strings.TrimSpace(folder)) {
+			return custom
+		}
+	}
+	return ""
 }
 
 func withoutFolderTags(tags []string) []string {
 	out := make([]string, 0, len(tags))
 	for _, tag := range tags {
-		if hasTag([]string{tag}, "graph-draft") || hasTag([]string{tag}, "graph-sent") {
+		if hasTag([]string{tag}, "graph-draft") || hasTag([]string{tag}, "graph-sent") ||
+			strings.HasPrefix(tag, folderTagPrefix) {
 			continue
 		}
 		out = append(out, tag)
@@ -208,8 +222,9 @@ func withoutFolderTags(tags []string) []string {
 }
 
 func (s *Server) folder(w http.ResponseWriter, r *http.Request, mailbox, folder string) {
-	if !strings.EqualFold(folder, "inbox") {
-		graphError(w, http.StatusNotFound, "ErrorItemNotFound", "Only the inbox folder is supported")
+	folder = s.normalizedFolder(folder)
+	if folder == "" {
+		graphError(w, http.StatusNotFound, "ErrorItemNotFound", "Unknown mail folder")
 		return
 	}
 	list, err := s.mp.List(r.Context(), 0, 1000)
@@ -219,11 +234,26 @@ func (s *Server) folder(w http.ResponseWriter, r *http.Request, mailbox, folder 
 	}
 	unread := 0
 	for _, m := range list.Messages {
-		if belongsTo(m, mailbox) && !m.Read && !hasTag(m.Tags, "graph-draft") && !hasTag(m.Tags, "graph-sent") {
+		if s.matchesFolder(m, mailbox, folder) && !m.Read {
 			unread++
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"id": "inbox", "displayName": "Inbox", "unreadItemCount": unread})
+	writeJSON(w, http.StatusOK, map[string]any{"id": folder, "displayName": folderDisplayName(folder), "unreadItemCount": unread})
+}
+
+func (s *Server) folderList(w http.ResponseWriter, mailbox string) {
+	values := []map[string]any{
+		{"id": "inbox", "displayName": "Inbox"},
+		{"id": "drafts", "displayName": "Drafts"},
+		{"id": "sentitems", "displayName": "Sent Items"},
+	}
+	for _, folder := range s.folders {
+		values = append(values, map[string]any{"id": folder, "displayName": folder})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"@odata.context": "https://graph.microsoft.com/v1.0/$metadata#users('" + mailbox + "')/mailFolders",
+		"value":          values,
+	})
 }
 
 func (s *Server) list(w http.ResponseWriter, r *http.Request, mailbox, folder string) {
@@ -236,7 +266,7 @@ func (s *Server) list(w http.ResponseWriter, r *http.Request, mailbox, folder st
 	headersByID := make(map[string]map[string][]string)
 	conversation := filterConversation(r.URL.Query().Get("$filter"))
 	for _, m := range all {
-		if !matchesFolder(m, mailbox, folder) {
+		if !s.matchesFolder(m, mailbox, folder) {
 			continue
 		}
 		if conversation != "" {
@@ -272,7 +302,7 @@ func (s *Server) list(w http.ResponseWriter, r *http.Request, mailbox, folder st
 				return
 			}
 		}
-		values = append(values, summaryToGraph(m, headers, folderID(folder)))
+		values = append(values, summaryToGraph(m, headers, s.folderID(folder)))
 	}
 	response := map[string]any{"@odata.context": "https://graph.microsoft.com/v1.0/$metadata#users('" + mailbox + "')/messages", "value": values}
 	if end < len(filtered) {
@@ -313,7 +343,7 @@ func (s *Server) get(w http.ResponseWriter, r *http.Request, id string) {
 			s.upstreamError(w, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, summaryToGraph(m, headers, folderForMessage(m)))
+		writeJSON(w, http.StatusOK, summaryToGraph(m, headers, s.folderForMessage(m)))
 		return
 	}
 	m, err := s.mp.Get(r.Context(), id)
@@ -384,7 +414,7 @@ func (s *Server) patch(w http.ResponseWriter, r *http.Request, id string) {
 		s.upstreamError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, summaryToGraph(m, headers, folderForMessage(m)))
+	writeJSON(w, http.StatusOK, summaryToGraph(m, headers, s.folderForMessage(m)))
 }
 
 type graphRecipient struct {
@@ -530,22 +560,26 @@ func belongsTo(m mailpit.MessageSummary, mailbox string) bool {
 	return false
 }
 
-func matchesFolder(m mailpit.MessageSummary, mailbox, folder string) bool {
+func (s *Server) matchesFolder(m mailpit.MessageSummary, mailbox, folder string) bool {
+	actual := s.folderForMessage(m)
 	switch strings.ToLower(folder) {
 	case "inbox":
-		return belongsTo(m, mailbox) && !hasTag(m.Tags, "graph-draft") && !hasTag(m.Tags, "graph-sent")
+		return belongsTo(m, mailbox) && actual == "inbox"
 	case "drafts":
-		return strings.EqualFold(m.From.Address, mailbox) && hasTag(m.Tags, "graph-draft")
+		return strings.EqualFold(m.From.Address, mailbox) && actual == "drafts"
 	case "sentitems", "sent":
-		return strings.EqualFold(m.From.Address, mailbox) && hasTag(m.Tags, "graph-sent")
+		return strings.EqualFold(m.From.Address, mailbox) && actual == "sentitems"
 	case "all":
 		return belongsTo(m, mailbox) || strings.EqualFold(m.From.Address, mailbox)
 	default:
-		return false
+		return belongsTo(m, mailbox) && strings.EqualFold(actual, folder)
 	}
 }
 
-func folderID(folder string) string {
+func (s *Server) folderID(folder string) string {
+	if normalized := s.normalizedFolder(folder); normalized != "" {
+		return normalized
+	}
 	switch strings.ToLower(folder) {
 	case "drafts":
 		return "drafts"
@@ -556,14 +590,63 @@ func folderID(folder string) string {
 	}
 }
 
-func folderForMessage(m mailpit.MessageSummary) string {
+func (s *Server) folderForMessage(m mailpit.MessageSummary) string {
 	if hasTag(m.Tags, "graph-draft") {
 		return "drafts"
 	}
 	if hasTag(m.Tags, "graph-sent") {
 		return "sentitems"
 	}
+	for _, tag := range m.Tags {
+		if folder, ok := folderFromTag(tag); ok && s.normalizedFolder(folder) != "" {
+			return s.normalizedFolder(folder)
+		}
+	}
 	return "inbox"
+}
+
+func folderDisplayName(folder string) string {
+	switch strings.ToLower(folder) {
+	case "inbox":
+		return "Inbox"
+	case "drafts":
+		return "Drafts"
+	case "sentitems":
+		return "Sent Items"
+	default:
+		return folder
+	}
+}
+
+func normalizedCustomFolders(folders []string) []string {
+	var out []string
+	for _, folder := range folders {
+		folder = strings.TrimSpace(folder)
+		if folder == "" || strings.Contains(folder, "/") {
+			continue
+		}
+		switch strings.ToLower(folder) {
+		case "inbox", "drafts", "sentitems", "sent items":
+			continue
+		}
+		out = append(out, folder)
+	}
+	return unique(out)
+}
+
+func folderTag(folder string) string {
+	return folderTagPrefix + base64.RawURLEncoding.EncodeToString([]byte(folder))
+}
+
+func folderFromTag(tag string) (string, bool) {
+	if !strings.HasPrefix(tag, folderTagPrefix) {
+		return "", false
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(tag, folderTagPrefix))
+	if err != nil || len(raw) == 0 {
+		return "", false
+	}
+	return string(raw), true
 }
 
 func hasTag(tags []string, wanted string) bool {

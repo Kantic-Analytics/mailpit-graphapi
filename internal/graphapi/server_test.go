@@ -156,3 +156,55 @@ func TestMoveMessageRejectsUnsupportedFolder(t *testing.T) {
 		t.Fatalf("got %d, want %d", w.Code, http.StatusNotFound)
 	}
 }
+
+func TestCustomFoldersAreListedAndMessagesCanMoveIntoThem(t *testing.T) {
+	fake := &fakeMailpit{messages: []mailpit.MessageSummary{{
+		ID: "id-1", MessageID: "<id-1@example.test>",
+		To: []mailpit.Address{{Address: "box@example.test"}},
+	}}}
+	h := New(fake, Config{Token: "secret", Folders: []string{"SUIVI", "SAV"}}).Handler()
+
+	request := func(method, path, body string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(method, path, strings.NewReader(body))
+		r.Header.Set("Authorization", "Bearer secret")
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w
+	}
+
+	folders := request(http.MethodGet, "/v1.0/users/box@example.test/mailFolders", "")
+	if folders.Code != http.StatusOK || !strings.Contains(folders.Body.String(), `"displayName":"SAV"`) {
+		t.Fatalf("folder list: %d %s", folders.Code, folders.Body.String())
+	}
+
+	moved := request(http.MethodPost, "/v1.0/users/box@example.test/messages/id-1/move", `{"destinationId":"SAV"}`)
+	if moved.Code != http.StatusCreated || !hasTag(fake.tags, folderTag("SAV")) {
+		t.Fatalf("move: %d %s tags=%v", moved.Code, moved.Body.String(), fake.tags)
+	}
+
+	listed := request(http.MethodGet, "/v1.0/users/box@example.test/mailFolders/SAV/messages", "")
+	if listed.Code != http.StatusOK || !strings.Contains(listed.Body.String(), `"id":"id-1"`) ||
+		!strings.Contains(listed.Body.String(), `"parentFolderId":"SAV"`) {
+		t.Fatalf("custom folder listing: %d %s", listed.Code, listed.Body.String())
+	}
+}
+
+func TestMovingBetweenCustomFoldersPreservesCategories(t *testing.T) {
+	fake := &fakeMailpit{
+		messages: []mailpit.MessageSummary{{ID: "id-1", To: []mailpit.Address{{Address: "box@example.test"}}}},
+		tags:     append(categoryTags([]string{"Traitement IA en cours"}), folderTag("SUIVI")),
+	}
+	h := New(fake, Config{Token: "secret", Folders: []string{"SUIVI", "SAV"}}).Handler()
+	r := httptest.NewRequest(http.MethodPost, "/v1.0/users/box@example.test/messages/id-1/move", strings.NewReader(`{"destinationId":"SAV"}`))
+	r.Header.Set("Authorization", "Bearer secret")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusCreated || !hasTag(fake.tags, folderTag("SAV")) || hasTag(fake.tags, folderTag("SUIVI")) {
+		t.Fatalf("move response=%d tags=%v", w.Code, fake.tags)
+	}
+	got := categoriesFromTags(fake.tags)
+	if len(got) != 1 || got[0] != "Traitement IA en cours" {
+		t.Fatalf("categories lost after move: %v", got)
+	}
+}
