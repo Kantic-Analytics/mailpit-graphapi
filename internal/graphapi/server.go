@@ -66,7 +66,8 @@ func New(mp Mailpit, cfg Config) *Server {
 }
 
 // ReconcileDisplayTags upgrades messages created by older sidecar versions.
-// Reversible tags remain authoritative; readable tags are rebuilt from them.
+// Legacy Base64URL tags are decoded once and then removed: Mailpit exposes all
+// tags in its UI, so readable tags are now the authoritative representation.
 func ReconcileDisplayTags(ctx context.Context, mp Mailpit) (int, error) {
 	const pageSize = 1000
 	updated := 0
@@ -178,6 +179,8 @@ func (s *Server) graph(w http.ResponseWriter, r *http.Request) {
 		s.patch(w, r, tail[1])
 	case len(tail) == 3 && tail[0] == "messages" && tail[2] == "move" && r.Method == http.MethodPost:
 		s.move(w, r, tail[1])
+	case len(tail) == 3 && tail[0] == "messages" && tail[2] == "reply" && r.Method == http.MethodPost:
+		s.reply(w, r, mailbox, tail[1])
 	case len(tail) == 1 && tail[0] == "messages" && r.Method == http.MethodPost:
 		s.create(w, r, mailbox, true)
 	case len(tail) == 1 && tail[0] == "sendMail" && r.Method == http.MethodPost:
@@ -512,6 +515,58 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request, mailbox string, 
 	w.WriteHeader(http.StatusAccepted)
 }
 
+func (s *Server) reply(w http.ResponseWriter, r *http.Request, mailbox, id string) {
+	var envelope struct {
+		Message graphMessageInput `json:"message"`
+	}
+	if err := decodeBody(w, r, &envelope); err != nil {
+		return
+	}
+	original, err := s.mp.Get(r.Context(), id)
+	if err != nil {
+		s.upstreamError(w, err)
+		return
+	}
+	recipients := original.ReplyTo
+	if len(recipients) == 0 {
+		recipients = []mailpit.Address{original.From}
+	}
+	to := make([]mailpit.SendAddress, 0, len(recipients))
+	for _, recipient := range recipients {
+		to = append(to, mailpit.SendAddress{Name: recipient.Name, Email: recipient.Address})
+	}
+	if len(to) == 0 || strings.TrimSpace(to[0].Email) == "" {
+		graphError(w, http.StatusBadRequest, "ErrorInvalidRecipients", "Source message has no reply recipient")
+		return
+	}
+	headers, err := s.mp.Headers(r.Context(), id)
+	if err != nil {
+		s.upstreamError(w, err)
+		return
+	}
+	messageID := original.MessageID
+	if values := headers["Message-ID"]; messageID == "" && len(values) > 0 {
+		messageID = values[0]
+	}
+	outHeaders := map[string]string{
+		"In-Reply-To":             messageID,
+		"References":              messageID,
+		"X-Graph-Conversation-ID": conversationIDFor(messageID, headers),
+	}
+	req := mailpit.SendRequest{From: mailpit.SendAddress{Email: mailbox}, To: to,
+		Subject: "Re: " + original.Subject, Headers: outHeaders, Tags: []string{"graph-sent"}}
+	if strings.EqualFold(envelope.Message.Body.ContentType, "html") {
+		req.HTML = envelope.Message.Body.Content
+	} else {
+		req.Text = envelope.Message.Body.Content
+	}
+	if _, err := s.mp.Send(r.Context(), req); err != nil {
+		s.upstreamError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusAccepted)
+}
+
 func sendAddresses(in []graphRecipient) []mailpit.SendAddress {
 	out := make([]mailpit.SendAddress, 0, len(in))
 	for _, r := range in {
@@ -664,7 +719,7 @@ func normalizedCustomFolders(folders []string) []string {
 }
 
 func folderTag(folder string) string {
-	return folderTagPrefix + base64.RawURLEncoding.EncodeToString([]byte(folder))
+	return folderDisplayTag(folder)
 }
 
 func folderDisplayTag(folder string) string {
@@ -676,6 +731,12 @@ func folderDisplayTag(folder string) string {
 }
 
 func folderFromTag(tag string) (string, bool) {
+	if strings.HasPrefix(tag, folderDisplayTagPrefix) {
+		folder := strings.TrimSpace(strings.TrimPrefix(tag, folderDisplayTagPrefix))
+		return folder, folder != ""
+	}
+	// Read legacy tags during startup migration and when upgrading a running
+	// Mailpit database. New writes never produce this representation.
 	if !strings.HasPrefix(tag, folderTagPrefix) {
 		return "", false
 	}
@@ -696,10 +757,9 @@ func hasTag(tags []string, wanted string) bool {
 }
 
 func categoryTags(categories []string) []string {
-	out := make([]string, 0, 2*len(categories))
+	out := make([]string, 0, len(categories))
 	for _, category := range categories {
 		if category = strings.TrimSpace(category); category != "" {
-			out = append(out, categoryTagPrefix+base64.RawURLEncoding.EncodeToString([]byte(category)))
 			if label := asciiDisplayLabel(category); label != "" {
 				out = append(out, categoryDisplayTagPrefix+label)
 			}
@@ -711,12 +771,18 @@ func categoryTags(categories []string) []string {
 func categoriesFromTags(tags []string) []string {
 	var out []string
 	for _, tag := range tags {
-		if !strings.HasPrefix(tag, categoryTagPrefix) {
+		if strings.HasPrefix(tag, categoryDisplayTagPrefix) {
+			if category := graphCategory(strings.TrimPrefix(tag, categoryDisplayTagPrefix)); category != "" {
+				out = append(out, category)
+			}
 			continue
 		}
-		raw, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(tag, categoryTagPrefix))
-		if err == nil && len(raw) > 0 {
-			out = append(out, string(raw))
+		// Backwards-compatible read for the migration path only.
+		if strings.HasPrefix(tag, categoryTagPrefix) {
+			raw, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(tag, categoryTagPrefix))
+			if err == nil && len(raw) > 0 {
+				out = append(out, string(raw))
+			}
 		}
 	}
 	return unique(out)
@@ -734,22 +800,64 @@ func replaceCategoryTags(tags, categories []string) []string {
 
 func withDisplayTags(tags []string) []string {
 	out := make([]string, 0, len(tags)+2)
+	legacyCategories := categoriesFromLegacyTags(tags)
+	legacyFolders := foldersFromLegacyTags(tags)
 	for _, tag := range tags {
-		if strings.HasPrefix(tag, categoryDisplayTagPrefix) || strings.HasPrefix(tag, folderDisplayTagPrefix) {
+		if strings.HasPrefix(tag, categoryTagPrefix) || strings.HasPrefix(tag, folderTagPrefix) {
 			continue
 		}
 		out = append(out, tag)
 	}
-	for _, category := range categoriesFromTags(tags) {
+	for _, category := range legacyCategories {
 		if label := asciiDisplayLabel(category); label != "" {
 			out = append(out, categoryDisplayTagPrefix+label)
 		}
 	}
+	for _, folder := range legacyFolders {
+		if label := asciiDisplayLabel(folder); label != "" {
+			out = append(out, folderDisplayTagPrefix+label)
+		}
+	}
+	return unique(out)
+}
+
+func graphCategory(label string) string {
+	label = strings.TrimSpace(label)
+	switch strings.ToLower(label) {
+	case "traitement ia en cours":
+		return "Traitement IA en cours"
+	case "traite par ia":
+		return "Traité par IA"
+	case "a traiter par un humain":
+		return "À traiter par un humain"
+	default:
+		return label
+	}
+}
+
+func categoriesFromLegacyTags(tags []string) []string {
+	var out []string
 	for _, tag := range tags {
-		if folder, ok := folderFromTag(tag); ok {
-			if label := asciiDisplayLabel(folder); label != "" {
-				out = append(out, folderDisplayTagPrefix+label)
-			}
+		if !strings.HasPrefix(tag, categoryTagPrefix) {
+			continue
+		}
+		raw, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(tag, categoryTagPrefix))
+		if err == nil && len(raw) > 0 {
+			out = append(out, string(raw))
+		}
+	}
+	return unique(out)
+}
+
+func foldersFromLegacyTags(tags []string) []string {
+	var out []string
+	for _, tag := range tags {
+		if !strings.HasPrefix(tag, folderTagPrefix) {
+			continue
+		}
+		raw, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(tag, folderTagPrefix))
+		if err == nil && len(raw) > 0 {
+			out = append(out, string(raw))
 		}
 	}
 	return unique(out)

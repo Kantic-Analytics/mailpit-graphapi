@@ -16,12 +16,13 @@ base is `/v1.0`; `{user}` is an email address and `{id}` is a Mailpit database I
 | `POST /users/{user}/messages/{id}/move` | Supported | inbox, drafts, sentitems |
 | `POST /users/{user}/messages` | Supported | captured message tagged `graph-draft` |
 | `POST /users/{user}/sendMail` | Supported | captured message tagged `graph-sent` |
+| `POST /users/{user}/messages/{id}/reply` | Supported | captured threaded reply tagged `graph-sent` |
 
 Built-in folders are `inbox`, `drafts`, and `sentitems`. Additional top-level
-folders are configured with `MAILPIT_GRAPH_FOLDERS` and stored as UTF-8-safe
-Mailpit tags. Reversible Base64URL tags are accompanied by human-readable ASCII
-tags in the Mailpit UI; those display tags are never exposed as Graph
-categories. The message list honors
+folders are configured with `MAILPIT_GRAPH_FOLDERS` and stored as readable
+ASCII Mailpit tags. Lifecycle categories use the same representation and are
+mapped back to their exact Graph spelling. On startup, legacy Base64URL tags
+are migrated to readable tags and removed. The message list honors
 `$top`, `$skip`, ascending `$orderby`, `receivedDateTime ge ...`, and
 `conversationId eq '...'`. Other OData expressions are ignored.
 

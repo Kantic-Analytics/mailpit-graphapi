@@ -106,6 +106,28 @@ func TestSendMail(t *testing.T) {
 	}
 }
 
+func TestReply(t *testing.T) {
+	fake := &fakeMailpit{}
+	h := New(fake, Config{Token: "secret"}).Handler()
+	body := `{"message":{"body":{"contentType":"Text","content":"Réponse"}}}`
+	r := httptest.NewRequest(http.MethodPost, "/v1.0/users/box@example.test/messages/id-1/reply", strings.NewReader(body))
+	r.Header.Set("Authorization", "Bearer secret")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("got %d: %s", w.Code, w.Body.String())
+	}
+	if fake.sent.From.Email != "box@example.test" || fake.sent.To[0].Email != "sender@example.test" {
+		t.Fatalf("unexpected envelope: %#v", fake.sent)
+	}
+	if fake.sent.Text != "Réponse" || fake.sent.Subject != "Re: Hello" || !hasTag(fake.sent.Tags, "graph-sent") {
+		t.Fatalf("unexpected reply: %#v", fake.sent)
+	}
+	if fake.sent.Headers["In-Reply-To"] != "<one@example.test>" || fake.sent.Headers["X-Graph-Conversation-ID"] == "" {
+		t.Fatalf("thread headers missing: %#v", fake.sent.Headers)
+	}
+}
+
 func TestPatchReadAndCategories(t *testing.T) {
 	fake := &fakeMailpit{messages: []mailpit.MessageSummary{{ID: "id-1", MessageID: "<id-1@example.test>", To: []mailpit.Address{{Address: "box@example.test"}}}}}
 	h := New(fake, Config{Token: "secret"}).Handler()
@@ -131,13 +153,18 @@ func TestCategoriesRoundTripUnicodeThroughMailpitSafeTags(t *testing.T) {
 	if !hasTag(tags, "Categorie - Traite par IA") || !hasTag(tags, "Categorie - A traiter par un humain") {
 		t.Fatalf("human-readable category tags missing: %v", tags)
 	}
+	for _, tag := range tags {
+		if strings.HasPrefix(tag, categoryTagPrefix) {
+			t.Fatalf("technical Base64 category tag leaked into Mailpit: %v", tags)
+		}
+	}
 }
 
 func TestReconcileDisplayTagsUpgradesExistingMessages(t *testing.T) {
 	encodedCategory := categoryTagPrefix + base64.RawURLEncoding.EncodeToString([]byte("À traiter par un humain"))
 	fake := &fakeMailpit{
 		messages: []mailpit.MessageSummary{{ID: "id-1"}},
-		tags:     []string{encodedCategory, folderTag("SAV")},
+		tags:     []string{encodedCategory, folderTagPrefix + base64.RawURLEncoding.EncodeToString([]byte("SAV"))},
 	}
 
 	updated, err := ReconcileDisplayTags(context.Background(), fake)
@@ -149,6 +176,11 @@ func TestReconcileDisplayTagsUpgradesExistingMessages(t *testing.T) {
 	}
 	if !hasTag(fake.tags, "Categorie - A traiter par un humain") || !hasTag(fake.tags, "Dossier - SAV") {
 		t.Fatalf("display tags missing after reconciliation: %v", fake.tags)
+	}
+	for _, tag := range fake.tags {
+		if strings.HasPrefix(tag, categoryTagPrefix) || strings.HasPrefix(tag, folderTagPrefix) {
+			t.Fatalf("legacy technical tag survived reconciliation: %v", fake.tags)
+		}
 	}
 	if got := categoriesFromTags(fake.tags); len(got) != 1 || got[0] != "À traiter par un humain" {
 		t.Fatalf("Graph category changed during reconciliation: %v", got)
