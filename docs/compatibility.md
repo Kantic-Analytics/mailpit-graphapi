@@ -6,8 +6,9 @@ base is `/v1.0`; `{user}` is an email address and `{id}` is a Mailpit database I
 | Graph route | Status | Mailpit mapping |
 |---|---|---|
 | `POST /{tenant}/oauth2/v2.0/token` | Supported | local static bearer token |
-| `GET /users/{user}/mailFolders` | Supported | well-known and configured folder list |
+| `GET /users/{user}/mailFolders` | Supported | well-known root folder list |
 | `GET /users/{user}/mailFolders/{folder}` | Supported | computed unread count |
+| `GET /users/{user}/mailFolders/{folder}/childFolders` | Supported | configured direct children of Inbox |
 | `GET /users/{user}/mailFolders/{folder}/messages` | Supported | messages/tags |
 | `GET /users/{user}/messages` | Supported | messages addressed to/from user |
 | `GET /users/{user}/messages/{id}` | Supported | message + headers |
@@ -18,11 +19,14 @@ base is `/v1.0`; `{user}` is an email address and `{id}` is a Mailpit database I
 | `POST /users/{user}/sendMail` | Supported | captured message tagged `graph-sent` |
 | `POST /users/{user}/messages/{id}/reply` | Supported | captured threaded reply tagged `graph-sent` |
 
-Built-in folders are `inbox`, `drafts`, and `sentitems`. Additional top-level
-folders are configured with `MAILPIT_GRAPH_FOLDERS` and stored as readable
-ASCII Mailpit tags. Lifecycle categories use the same representation and are
-mapped back to their exact Graph spelling. On startup, legacy Base64URL tags
-are migrated to readable tags and removed. The message list honors
+Built-in root folders are `inbox`, `drafts`, and `sentitems`. Additional folders
+are configured with `MAILPIT_GRAPH_FOLDERS` and exposed as direct children of
+Inbox. Each configured folder has a deterministic, URL-safe opaque ID distinct
+from its display name; display names may contain literal `/` characters. Folder
+state is stored as readable ASCII Mailpit tags. Lifecycle categories use the
+same representation and are mapped back to their exact Graph spelling. On
+startup, legacy Base64URL tags are migrated to readable tags and removed. The
+message list honors
 `$top`, `$skip`, ascending `$orderby`, `receivedDateTime ge ...`, and
 `conversationId eq '...'`. Other OData expressions are ignored.
 
@@ -52,3 +56,5 @@ sent through this sidecar preserve their supplied conversation ID.
   by recipient or sender; it is not an access-control boundary.
 - `sendMail` captures a message in Mailpit. It does not deliver to Microsoft 365.
 - `PATCH` operations are sequential and are not transactionally atomic.
+- Configured folders model one level below Inbox; arbitrary nested custom folder
+  hierarchies are not implemented.

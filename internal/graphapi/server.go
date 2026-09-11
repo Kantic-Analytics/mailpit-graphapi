@@ -25,6 +25,7 @@ import (
 const maxBodyBytes = 1 << 20
 const categoryTagPrefix = "graph-category-"
 const folderTagPrefix = "graph-folder-"
+const customFolderIDPrefix = "mailpit-folder-"
 const categoryDisplayTagPrefix = "Categorie - "
 const folderDisplayTagPrefix = "Dossier - "
 
@@ -167,6 +168,8 @@ func (s *Server) graph(w http.ResponseWriter, r *http.Request) {
 		s.folderList(w, mailbox)
 	case len(tail) == 2 && tail[0] == "mailFolders" && r.Method == http.MethodGet:
 		s.folder(w, r, mailbox, tail[1])
+	case len(tail) == 3 && tail[0] == "mailFolders" && tail[2] == "childFolders" && r.Method == http.MethodGet:
+		s.childFolderList(w, mailbox, tail[1])
 	case len(tail) == 3 && tail[0] == "mailFolders" && tail[2] == "messages" && r.Method == http.MethodGet:
 		s.list(w, r, mailbox, tail[1])
 	case len(tail) == 1 && tail[0] == "messages" && r.Method == http.MethodGet:
@@ -221,7 +224,7 @@ func (s *Server) move(w http.ResponseWriter, r *http.Request, id string) {
 		s.upstreamError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"id": id, "parentFolderId": folder})
+	writeJSON(w, http.StatusCreated, map[string]any{"id": id, "parentFolderId": s.folderID(folder)})
 }
 
 func (s *Server) normalizedFolder(folder string) string {
@@ -234,7 +237,8 @@ func (s *Server) normalizedFolder(folder string) string {
 		return "sentitems"
 	}
 	for _, custom := range s.folders {
-		if strings.EqualFold(custom, strings.TrimSpace(folder)) {
+		if strings.EqualFold(custom, strings.TrimSpace(folder)) ||
+			strings.EqualFold(customFolderID(custom), strings.TrimSpace(folder)) {
 			return custom
 		}
 	}
@@ -270,7 +274,11 @@ func (s *Server) folder(w http.ResponseWriter, r *http.Request, mailbox, folder 
 			unread++
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"id": folder, "displayName": folderDisplayName(folder), "unreadItemCount": unread})
+	value := map[string]any{"id": s.folderID(folder), "displayName": folderDisplayName(folder), "unreadItemCount": unread}
+	if !isWellKnownFolder(folder) {
+		value["parentFolderId"] = "inbox"
+	}
+	writeJSON(w, http.StatusOK, value)
 }
 
 func (s *Server) folderList(w http.ResponseWriter, mailbox string) {
@@ -279,8 +287,26 @@ func (s *Server) folderList(w http.ResponseWriter, mailbox string) {
 		{"id": "drafts", "displayName": "Drafts"},
 		{"id": "sentitems", "displayName": "Sent Items"},
 	}
-	for _, folder := range s.folders {
-		values = append(values, map[string]any{"id": folder, "displayName": folder})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"@odata.context": "https://graph.microsoft.com/v1.0/$metadata#users('" + mailbox + "')/mailFolders",
+		"value":          values,
+	})
+}
+
+func (s *Server) childFolderList(w http.ResponseWriter, mailbox, parent string) {
+	folder := s.normalizedFolder(parent)
+	if folder == "" {
+		graphError(w, http.StatusNotFound, "ErrorItemNotFound", "Unknown mail folder")
+		return
+	}
+	values := make([]map[string]any, 0, len(s.folders))
+	if folder == "inbox" {
+		for _, custom := range s.folders {
+			values = append(values, map[string]any{
+				"id": customFolderID(custom), "displayName": custom,
+				"parentFolderId": "inbox", "childFolderCount": 0,
+			})
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"@odata.context": "https://graph.microsoft.com/v1.0/$metadata#users('" + mailbox + "')/mailFolders",
@@ -289,6 +315,13 @@ func (s *Server) folderList(w http.ResponseWriter, mailbox string) {
 }
 
 func (s *Server) list(w http.ResponseWriter, r *http.Request, mailbox, folder string) {
+	if !strings.EqualFold(folder, "all") {
+		folder = s.normalizedFolder(folder)
+		if folder == "" {
+			graphError(w, http.StatusNotFound, "ErrorItemNotFound", "Unknown mail folder")
+			return
+		}
+	}
 	all, err := s.allMessages(r)
 	if err != nil {
 		s.upstreamError(w, err)
@@ -661,17 +694,14 @@ func (s *Server) matchesFolder(m mailpit.MessageSummary, mailbox, folder string)
 }
 
 func (s *Server) folderID(folder string) string {
-	if normalized := s.normalizedFolder(folder); normalized != "" {
-		return normalized
-	}
-	switch strings.ToLower(folder) {
-	case "drafts":
-		return "drafts"
-	case "sentitems", "sent":
-		return "sentitems"
-	default:
+	normalized := s.normalizedFolder(folder)
+	if normalized == "" {
 		return "inbox"
 	}
+	if isWellKnownFolder(normalized) {
+		return strings.ToLower(normalized)
+	}
+	return customFolderID(normalized)
 }
 
 func (s *Server) folderForMessage(m mailpit.MessageSummary) string {
@@ -680,6 +710,11 @@ func (s *Server) folderForMessage(m mailpit.MessageSummary) string {
 	}
 	if hasTag(m.Tags, "graph-sent") {
 		return "sentitems"
+	}
+	for _, folder := range s.folders {
+		if hasTag(m.Tags, folderDisplayTag(folder)) {
+			return folder
+		}
 	}
 	for _, tag := range m.Tags {
 		if folder, ok := folderFromTag(tag); ok && s.normalizedFolder(folder) != "" {
@@ -704,18 +739,37 @@ func folderDisplayName(folder string) string {
 
 func normalizedCustomFolders(folders []string) []string {
 	var out []string
+	seenIDs := make(map[string]bool)
 	for _, folder := range folders {
 		folder = strings.TrimSpace(folder)
-		if folder == "" || strings.Contains(folder, "/") {
+		if folder == "" {
 			continue
 		}
 		switch strings.ToLower(folder) {
 		case "inbox", "drafts", "sentitems", "sent items":
 			continue
 		}
-		out = append(out, folder)
+		id := customFolderID(folder)
+		if !seenIDs[id] {
+			out = append(out, folder)
+			seenIDs[id] = true
+		}
 	}
 	return unique(out)
+}
+
+func customFolderID(folder string) string {
+	sum := sha256.Sum256([]byte(strings.ToLower(strings.TrimSpace(folder))))
+	return customFolderIDPrefix + hex.EncodeToString(sum[:12])
+}
+
+func isWellKnownFolder(folder string) bool {
+	switch strings.ToLower(strings.TrimSpace(folder)) {
+	case "inbox", "drafts", "sentitems":
+		return true
+	default:
+		return false
+	}
 }
 
 func folderTag(folder string) string {

@@ -217,12 +217,14 @@ func TestMoveMessageRejectsUnsupportedFolder(t *testing.T) {
 	}
 }
 
-func TestCustomFoldersAreListedAndMessagesCanMoveIntoThem(t *testing.T) {
+func TestInboxChildrenHaveOpaqueIDsAndSupportSlashes(t *testing.T) {
+	const displayName = "Délai / Commande non recu"
 	fake := &fakeMailpit{messages: []mailpit.MessageSummary{{
 		ID: "id-1", MessageID: "<id-1@example.test>",
 		To: []mailpit.Address{{Address: "box@example.test"}},
 	}}}
-	h := New(fake, Config{Token: "secret", Folders: []string{"SUIVI", "SAV"}}).Handler()
+	h := New(fake, Config{Token: "secret", Folders: []string{displayName, "Divers"}}).Handler()
+	folderID := customFolderID(displayName)
 
 	request := func(method, path, body string) *httptest.ResponseRecorder {
 		r := httptest.NewRequest(method, path, strings.NewReader(body))
@@ -233,19 +235,40 @@ func TestCustomFoldersAreListedAndMessagesCanMoveIntoThem(t *testing.T) {
 	}
 
 	folders := request(http.MethodGet, "/v1.0/users/box@example.test/mailFolders", "")
-	if folders.Code != http.StatusOK || !strings.Contains(folders.Body.String(), `"displayName":"SAV"`) {
+	if folders.Code != http.StatusOK || strings.Contains(folders.Body.String(), displayName) {
 		t.Fatalf("folder list: %d %s", folders.Code, folders.Body.String())
 	}
 
-	moved := request(http.MethodPost, "/v1.0/users/box@example.test/messages/id-1/move", `{"destinationId":"SAV"}`)
-	if moved.Code != http.StatusCreated || !hasTag(fake.tags, folderTag("SAV")) || !hasTag(fake.tags, "Dossier - SAV") {
+	children := request(http.MethodGet, "/v1.0/users/box@example.test/mailFolders/inbox/childFolders?$select=id,displayName&$top=200", "")
+	if children.Code != http.StatusOK || !strings.Contains(children.Body.String(), `"displayName":"`+displayName+`"`) ||
+		!strings.Contains(children.Body.String(), `"id":"`+folderID+`"`) {
+		t.Fatalf("Inbox child list: %d %s", children.Code, children.Body.String())
+	}
+	if folderID == displayName || strings.Contains(folderID, "/") {
+		t.Fatalf("folder ID is not opaque and URL-safe: %q", folderID)
+	}
+
+	folder := request(http.MethodGet, "/v1.0/users/box@example.test/mailFolders/"+folderID, "")
+	if folder.Code != http.StatusOK || !strings.Contains(folder.Body.String(), `"parentFolderId":"inbox"`) ||
+		!strings.Contains(folder.Body.String(), `"displayName":"`+displayName+`"`) {
+		t.Fatalf("folder lookup: %d %s", folder.Code, folder.Body.String())
+	}
+
+	moved := request(http.MethodPost, "/v1.0/users/box@example.test/messages/id-1/move", `{"destinationId":"`+folderID+`"}`)
+	if moved.Code != http.StatusCreated || !hasTag(fake.tags, folderTag(displayName)) || !hasTag(fake.tags, "Dossier - Delai Commande non recu") ||
+		!strings.Contains(moved.Body.String(), `"parentFolderId":"`+folderID+`"`) {
 		t.Fatalf("move: %d %s tags=%v", moved.Code, moved.Body.String(), fake.tags)
 	}
 
-	listed := request(http.MethodGet, "/v1.0/users/box@example.test/mailFolders/SAV/messages", "")
+	listed := request(http.MethodGet, "/v1.0/users/box@example.test/mailFolders/"+folderID+"/messages", "")
 	if listed.Code != http.StatusOK || !strings.Contains(listed.Body.String(), `"id":"id-1"`) ||
-		!strings.Contains(listed.Body.String(), `"parentFolderId":"SAV"`) {
+		!strings.Contains(listed.Body.String(), `"parentFolderId":"`+folderID+`"`) {
 		t.Fatalf("custom folder listing: %d %s", listed.Code, listed.Body.String())
+	}
+
+	nested := request(http.MethodGet, "/v1.0/users/box@example.test/mailFolders/"+folderID+"/childFolders", "")
+	if nested.Code != http.StatusOK || !strings.Contains(nested.Body.String(), `"value":[]`) {
+		t.Fatalf("nested child list: %d %s", nested.Code, nested.Body.String())
 	}
 }
 
@@ -255,13 +278,16 @@ func TestMovingBetweenCustomFoldersPreservesCategories(t *testing.T) {
 		tags:     append(categoryTags([]string{"Traitement IA en cours"}), folderTag("SUIVI")),
 	}
 	h := New(fake, Config{Token: "secret", Folders: []string{"SUIVI", "SAV"}}).Handler()
-	r := httptest.NewRequest(http.MethodPost, "/v1.0/users/box@example.test/messages/id-1/move", strings.NewReader(`{"destinationId":"SAV"}`))
+	r := httptest.NewRequest(http.MethodPost, "/v1.0/users/box@example.test/messages/id-1/move", strings.NewReader(`{"destinationId":"`+customFolderID("SAV")+`"}`))
 	r.Header.Set("Authorization", "Bearer secret")
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
 
 	if w.Code != http.StatusCreated || !hasTag(fake.tags, folderTag("SAV")) || hasTag(fake.tags, folderTag("SUIVI")) {
 		t.Fatalf("move response=%d tags=%v", w.Code, fake.tags)
+	}
+	if !strings.Contains(w.Body.String(), `"parentFolderId":"`+customFolderID("SAV")+`"`) {
+		t.Fatalf("move response did not expose the opaque folder ID: %s", w.Body.String())
 	}
 	if !hasTag(fake.tags, "Dossier - SAV") || hasTag(fake.tags, "Dossier - SUIVI") {
 		t.Fatalf("readable folder tags were not replaced: %v", fake.tags)
