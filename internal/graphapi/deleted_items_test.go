@@ -19,6 +19,7 @@ type deletedItemsMailpit struct {
 	read       map[string]bool
 	listErr    error
 	getErr     error
+	gets       int
 	tagsErr    error
 	headErr    error
 	writes     int
@@ -45,6 +46,8 @@ func (f *deletedItemsMailpit) List(_ context.Context, start, limit int) (mailpit
 }
 
 func (f *deletedItemsMailpit) Get(_ context.Context, id string) (mailpit.Message, error) {
+	f.gets++
+	f.read[id] = true // The real Mailpit full-message endpoint marks a message read.
 	if f.getErr != nil {
 		return mailpit.Message{}, f.getErr
 	}
@@ -216,12 +219,12 @@ func TestDeletedItemsReservedNameAndMoveFailures(t *testing.T) {
 		}
 	}
 
-	fake.getErr = errors.New("upstream get failed")
+	fake.listErr = errors.New("upstream list failed")
 	response := deletedItemsRequest(h, http.MethodPost, "/v1.0/users/box@example.test/messages/id/move", `{"destinationId":"deleteditems"}`)
 	if response.Code != http.StatusBadGateway || fake.writes != 0 {
-		t.Fatalf("upstream get failure: %d %s writes=%d", response.Code, response.Body.String(), fake.writes)
+		t.Fatalf("upstream summary failure: %d %s writes=%d", response.Code, response.Body.String(), fake.writes)
 	}
-	fake.getErr = nil
+	fake.listErr = nil
 	fake.tagsErr = errors.New("upstream tags failed")
 	response = deletedItemsRequest(h, http.MethodPost, "/v1.0/users/box@example.test/messages/id/move", `{"destinationId":"deleteditems"}`)
 	if response.Code != http.StatusBadGateway || fake.writes != 0 {
@@ -268,7 +271,7 @@ func TestDeletedItemsIncomingAndOutgoingReadStateAndNoPermanentDelete(t *testing
 			if unsupported.Code != http.StatusNotFound {
 				t.Fatal("permanent deletion unexpectedly supported")
 			}
-			if fake.read[id] != read || fake.readWrites != 0 || fake.sends != 0 || len(categoriesFromTags(fake.tags[id])) != 1 || categoriesFromTags(fake.tags[id])[0] != "kept" {
+			if fake.read[id] != read || fake.readWrites != 0 || fake.gets != 0 || fake.sends != 0 || len(categoriesFromTags(fake.tags[id])) != 1 || categoriesFromTags(fake.tags[id])[0] != "kept" {
 				t.Fatal("move modified read state, categories or sent a message")
 			}
 		}

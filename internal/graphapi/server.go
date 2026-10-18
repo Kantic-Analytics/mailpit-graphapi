@@ -205,7 +205,7 @@ func (s *Server) move(w http.ResponseWriter, r *http.Request, id string) {
 		graphError(w, http.StatusNotFound, "ErrorItemNotFound", "Unknown mail folder")
 		return
 	}
-	message, err := s.mp.Get(r.Context(), id)
+	message, err := s.findSummary(r, id)
 	if err != nil {
 		s.upstreamError(w, err)
 		return
