@@ -188,7 +188,7 @@ func TestReconcileDisplayTagsUpgradesExistingMessages(t *testing.T) {
 }
 
 func TestMoveMessageToInboxPreservesCategories(t *testing.T) {
-	fake := &fakeMailpit{tags: []string{"Traitement IA en cours", "graph-draft"}}
+	fake := &fakeMailpit{messages: []mailpit.MessageSummary{{ID: "id-1"}}, tags: []string{"Traitement IA en cours", "graph-draft"}}
 	h := New(fake, Config{Token: "secret"}).Handler()
 	r := httptest.NewRequest(http.MethodPost, "/v1.0/users/box@example.test/messages/id-1/move", strings.NewReader(`{"destinationId":"inbox"}`))
 	r.Header.Set("Authorization", "Bearer secret")
