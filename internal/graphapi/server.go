@@ -217,6 +217,8 @@ func (s *Server) move(w http.ResponseWriter, r *http.Request, id string) {
 	case "sentitems":
 		tags = append(tags, "graph-sent")
 	case "inbox":
+	case "deleteditems":
+		tags = append(tags, folderTag("Deleted Items"))
 	default:
 		tags = append(tags, folderTag(folder), folderDisplayTag(folder))
 	}
@@ -235,6 +237,8 @@ func (s *Server) normalizedFolder(folder string) string {
 		return "drafts"
 	case "sentitems", "sent items":
 		return "sentitems"
+	case "deleteditems", "deleted items":
+		return "deleteditems"
 	}
 	for _, custom := range s.folders {
 		if strings.EqualFold(custom, strings.TrimSpace(folder)) ||
@@ -286,6 +290,7 @@ func (s *Server) folderList(w http.ResponseWriter, mailbox string) {
 		{"id": "inbox", "displayName": "Inbox"},
 		{"id": "drafts", "displayName": "Drafts"},
 		{"id": "sentitems", "displayName": "Sent Items"},
+		{"id": "deleteditems", "displayName": "Deleted Items"},
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"@odata.context": "https://graph.microsoft.com/v1.0/$metadata#users('" + mailbox + "')/mailFolders",
@@ -686,6 +691,8 @@ func (s *Server) matchesFolder(m mailpit.MessageSummary, mailbox, folder string)
 		return strings.EqualFold(m.From.Address, mailbox) && actual == "drafts"
 	case "sentitems", "sent":
 		return strings.EqualFold(m.From.Address, mailbox) && actual == "sentitems"
+	case "deleteditems":
+		return (belongsTo(m, mailbox) || strings.EqualFold(m.From.Address, mailbox)) && actual == "deleteditems"
 	case "all":
 		return belongsTo(m, mailbox) || strings.EqualFold(m.From.Address, mailbox)
 	default:
@@ -732,6 +739,8 @@ func folderDisplayName(folder string) string {
 		return "Drafts"
 	case "sentitems":
 		return "Sent Items"
+	case "deleteditems":
+		return "Deleted Items"
 	default:
 		return folder
 	}
@@ -746,7 +755,7 @@ func normalizedCustomFolders(folders []string) []string {
 			continue
 		}
 		switch strings.ToLower(folder) {
-		case "inbox", "drafts", "sentitems", "sent items":
+		case "inbox", "drafts", "sentitems", "sent items", "deleteditems", "deleted items":
 			continue
 		}
 		id := customFolderID(folder)
@@ -765,7 +774,7 @@ func customFolderID(folder string) string {
 
 func isWellKnownFolder(folder string) bool {
 	switch strings.ToLower(strings.TrimSpace(folder)) {
-	case "inbox", "drafts", "sentitems":
+	case "inbox", "drafts", "sentitems", "deleteditems":
 		return true
 	default:
 		return false

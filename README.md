@@ -12,10 +12,12 @@ email to the internet.
 ## What it does
 
 - issues a local OAuth `client_credentials` token;
-- lists Inbox, Drafts and Sent Items messages;
+- lists Inbox, Drafts, Sent Items and Deleted Items messages;
 - exposes message metadata and raw RFC 822 content;
 - maps Graph `isRead` and `categories` to Mailpit read state and tags;
-- simulates message moves between Inbox, Drafts and Sent Items;
+- simulates message moves between Inbox, Drafts, Sent Items, Deleted Items and
+  configured folders by updating Mailpit tags only; moving to Deleted Items
+  does not permanently delete a Mailpit message;
 - simulates configurable application folders as direct children of Inbox, with
   opaque identifiers distinct from their display names;
 - accepts folder display names containing `/`, such as
