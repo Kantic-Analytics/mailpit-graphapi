@@ -95,7 +95,7 @@ func deletedItemSummary(id, mailbox string, read bool, tags []string) mailpit.Me
 	}
 }
 
-func deletedItemsRequest(h http.Handler, method, path, body string) *httptest.ResponseRecorder {
+func authorizedRequest(h http.Handler, method, path, body string) *httptest.ResponseRecorder {
 	r := httptest.NewRequest(method, path, strings.NewReader(body))
 	r.Header.Set("Authorization", "Bearer secret")
 	w := httptest.NewRecorder()
@@ -117,23 +117,23 @@ func TestDeletedItemsBuiltInFolderRoutesAndMoveRestore(t *testing.T) {
 	}
 	h := New(fake, Config{Token: "secret", Folders: []string{"deleteditems", "Deleted Items", "Deleted Archive"}}).Handler()
 
-	list := deletedItemsRequest(h, http.MethodGet, "/v1.0/users/"+mailbox+"/mailFolders", "")
+	list := authorizedRequest(h, http.MethodGet, "/v1.0/users/"+mailbox+"/mailFolders", "")
 	if list.Code != http.StatusOK || !strings.Contains(list.Body.String(), `"id":"deleteditems"`) || !strings.Contains(list.Body.String(), `"displayName":"Deleted Items"`) {
 		t.Fatalf("root folders: %d %s", list.Code, list.Body.String())
 	}
-	children := deletedItemsRequest(h, http.MethodGet, "/v1.0/users/"+mailbox+"/mailFolders/deleteditems/childFolders", "")
+	children := authorizedRequest(h, http.MethodGet, "/v1.0/users/"+mailbox+"/mailFolders/deleteditems/childFolders", "")
 	if children.Code != http.StatusOK || !strings.Contains(children.Body.String(), `"value":[]`) {
 		t.Fatalf("Deleted Items children: %d %s", children.Code, children.Body.String())
 	}
 	for _, alias := range []string{"deleteditems", "Deleted%20Items"} {
-		folder := deletedItemsRequest(h, http.MethodGet, "/v1.0/users/"+mailbox+"/mailFolders/"+alias, "")
+		folder := authorizedRequest(h, http.MethodGet, "/v1.0/users/"+mailbox+"/mailFolders/"+alias, "")
 		if folder.Code != http.StatusOK || !strings.Contains(folder.Body.String(), `"id":"deleteditems"`) ||
 			!strings.Contains(folder.Body.String(), `"displayName":"Deleted Items"`) || !strings.Contains(folder.Body.String(), `"unreadItemCount":0`) {
 			t.Fatalf("folder alias %q: %d %s", alias, folder.Code, folder.Body.String())
 		}
 	}
 
-	move := deletedItemsRequest(h, http.MethodPost, "/v1.0/users/"+mailbox+"/messages/incoming/move", `{"destinationId":"Deleted Items"}`)
+	move := authorizedRequest(h, http.MethodPost, "/v1.0/users/"+mailbox+"/messages/incoming/move", `{"destinationId":"Deleted Items"}`)
 	if move.Code != http.StatusCreated || !strings.Contains(move.Body.String(), `"id":"incoming"`) || !strings.Contains(move.Body.String(), `"parentFolderId":"deleteditems"`) {
 		t.Fatalf("move to Deleted Items: %d %s", move.Code, move.Body.String())
 	}
@@ -142,28 +142,28 @@ func TestDeletedItemsBuiltInFolderRoutesAndMoveRestore(t *testing.T) {
 		categoriesFromTags(fake.tags["incoming"])[0] != "À traiter par un humain" || fake.read["incoming"] {
 		t.Fatalf("move did not preserve only message metadata and new folder state: tags=%v read=%v writes=%d", fake.tags["incoming"], fake.read["incoming"], fake.writes)
 	}
-	count := deletedItemsRequest(h, http.MethodGet, "/v1.0/users/"+mailbox+"/mailFolders/deleteditems", "")
+	count := authorizedRequest(h, http.MethodGet, "/v1.0/users/"+mailbox+"/mailFolders/deleteditems", "")
 	if count.Code != http.StatusOK || !strings.Contains(count.Body.String(), `"unreadItemCount":1`) {
 		t.Fatalf("unread count after move: %d %s", count.Code, count.Body.String())
 	}
 
-	deleted := deletedItemsRequest(h, http.MethodGet, "/v1.0/users/"+mailbox+"/mailFolders/deleteditems/messages", "")
+	deleted := authorizedRequest(h, http.MethodGet, "/v1.0/users/"+mailbox+"/mailFolders/deleteditems/messages", "")
 	if deleted.Code != http.StatusOK || !strings.Contains(deleted.Body.String(), `"id":"incoming"`) ||
 		strings.Contains(deleted.Body.String(), `"id":"other-mailbox"`) || !strings.Contains(deleted.Body.String(), `"parentFolderId":"deleteditems"`) ||
 		!strings.Contains(deleted.Body.String(), `"isRead":false`) || !strings.Contains(deleted.Body.String(), `"categories":["À traiter par un humain"]`) {
 		t.Fatalf("Deleted Items listing: %d %s", deleted.Code, deleted.Body.String())
 	}
-	inbox := deletedItemsRequest(h, http.MethodGet, "/v1.0/users/"+mailbox+"/mailFolders/inbox/messages", "")
+	inbox := authorizedRequest(h, http.MethodGet, "/v1.0/users/"+mailbox+"/mailFolders/inbox/messages", "")
 	if inbox.Code != http.StatusOK || strings.Contains(inbox.Body.String(), `"id":"incoming"`) {
 		t.Fatalf("Inbox still contains moved message: %d %s", inbox.Code, inbox.Body.String())
 	}
 
-	restore := deletedItemsRequest(h, http.MethodPost, "/v1.0/users/"+mailbox+"/messages/incoming/move", `{"destinationId":"inbox"}`)
+	restore := authorizedRequest(h, http.MethodPost, "/v1.0/users/"+mailbox+"/messages/incoming/move", `{"destinationId":"inbox"}`)
 	if restore.Code != http.StatusCreated || !strings.Contains(restore.Body.String(), `"id":"incoming"`) || !strings.Contains(restore.Body.String(), `"parentFolderId":"inbox"`) ||
 		hasTag(fake.tags["incoming"], folderTag("Deleted Items")) || len(categoriesFromTags(fake.tags["incoming"])) != 1 || fake.read["incoming"] {
 		t.Fatalf("restore to Inbox: %d %s tags=%v read=%v", restore.Code, restore.Body.String(), fake.tags["incoming"], fake.read["incoming"])
 	}
-	inbox = deletedItemsRequest(h, http.MethodGet, "/v1.0/users/"+mailbox+"/mailFolders/inbox/messages", "")
+	inbox = authorizedRequest(h, http.MethodGet, "/v1.0/users/"+mailbox+"/mailFolders/inbox/messages", "")
 	if inbox.Code != http.StatusOK || !strings.Contains(inbox.Body.String(), `"id":"incoming"`) {
 		t.Fatalf("restored message not in Inbox: %d %s", inbox.Code, inbox.Body.String())
 	}
@@ -180,12 +180,12 @@ func TestDeletedItemsFolderInferenceAndLegacyTagMigration(t *testing.T) {
 		read: map[string]bool{"human": false, "legacy": true},
 	}
 	h := New(fake, Config{Token: "secret"}).Handler()
-	listing := deletedItemsRequest(h, http.MethodGet, "/v1.0/users/box@example.test/mailFolders/deleteditems/messages", "")
+	listing := authorizedRequest(h, http.MethodGet, "/v1.0/users/box@example.test/mailFolders/deleteditems/messages", "")
 	if listing.Code != http.StatusOK || !strings.Contains(listing.Body.String(), `"id":"human"`) || !strings.Contains(listing.Body.String(), `"id":"legacy"`) ||
 		!strings.Contains(listing.Body.String(), `"parentFolderId":"deleteditems"`) {
 		t.Fatalf("human/legacy folder inference: %d %s", listing.Code, listing.Body.String())
 	}
-	folder := deletedItemsRequest(h, http.MethodGet, "/v1.0/users/box@example.test/mailFolders/Deleted%20Items", "")
+	folder := authorizedRequest(h, http.MethodGet, "/v1.0/users/box@example.test/mailFolders/Deleted%20Items", "")
 	if folder.Code != http.StatusOK || !strings.Contains(folder.Body.String(), `"unreadItemCount":1`) {
 		t.Fatalf("unread count: %d %s", folder.Code, folder.Body.String())
 	}
@@ -201,7 +201,7 @@ func TestDeletedItemsReservedNameAndMoveFailures(t *testing.T) {
 		tags:     map[string][]string{"id": {}}, read: map[string]bool{"id": false},
 	}
 	h := New(fake, Config{Token: "secret", Folders: []string{"Deleted Items", "deleteditems", "Deleted Archive"}}).Handler()
-	children := deletedItemsRequest(h, http.MethodGet, "/v1.0/users/box@example.test/mailFolders/inbox/childFolders", "")
+	children := authorizedRequest(h, http.MethodGet, "/v1.0/users/box@example.test/mailFolders/inbox/childFolders", "")
 	if children.Code != http.StatusOK || strings.Contains(children.Body.String(), `"displayName":"Deleted Items"`) || !strings.Contains(children.Body.String(), `"displayName":"Deleted Archive"`) {
 		t.Fatalf("reserved custom folder names: %d %s", children.Code, children.Body.String())
 	}
@@ -213,37 +213,37 @@ func TestDeletedItemsReservedNameAndMoveFailures(t *testing.T) {
 		{name: "unknown folder", body: `{"destinationId":"Missing"}`, status: http.StatusNotFound},
 		{name: "malformed body", body: `{"destinationId":`, status: http.StatusBadRequest},
 	} {
-		response := deletedItemsRequest(h, http.MethodPost, "/v1.0/users/box@example.test/messages/id/move", tc.body)
+		response := authorizedRequest(h, http.MethodPost, "/v1.0/users/box@example.test/messages/id/move", tc.body)
 		if response.Code != tc.status || fake.writes != 0 {
 			t.Errorf("%s: %d %s writes=%d", tc.name, response.Code, response.Body.String(), fake.writes)
 		}
 	}
 
 	fake.listErr = errors.New("upstream list failed")
-	response := deletedItemsRequest(h, http.MethodPost, "/v1.0/users/box@example.test/messages/id/move", `{"destinationId":"deleteditems"}`)
+	response := authorizedRequest(h, http.MethodPost, "/v1.0/users/box@example.test/messages/id/move", `{"destinationId":"deleteditems"}`)
 	if response.Code != http.StatusBadGateway || fake.writes != 0 {
 		t.Fatalf("upstream summary failure: %d %s writes=%d", response.Code, response.Body.String(), fake.writes)
 	}
 	fake.listErr = nil
 	fake.tagsErr = errors.New("upstream tags failed")
-	response = deletedItemsRequest(h, http.MethodPost, "/v1.0/users/box@example.test/messages/id/move", `{"destinationId":"deleteditems"}`)
+	response = authorizedRequest(h, http.MethodPost, "/v1.0/users/box@example.test/messages/id/move", `{"destinationId":"deleteditems"}`)
 	if response.Code != http.StatusBadGateway || fake.writes != 0 {
 		t.Fatalf("upstream tag failure: %d %s writes=%d", response.Code, response.Body.String(), fake.writes)
 	}
 	fake.tagsErr = nil
 	fake.listErr = errors.New("upstream list failed")
-	response = deletedItemsRequest(h, http.MethodGet, "/v1.0/users/box@example.test/mailFolders/deleteditems", "")
+	response = authorizedRequest(h, http.MethodGet, "/v1.0/users/box@example.test/mailFolders/deleteditems", "")
 	if response.Code != http.StatusBadGateway {
 		t.Fatalf("upstream unread-count failure: %d %s", response.Code, response.Body.String())
 	}
-	response = deletedItemsRequest(h, http.MethodGet, "/v1.0/users/box@example.test/mailFolders/deleteditems/messages", "")
+	response = authorizedRequest(h, http.MethodGet, "/v1.0/users/box@example.test/mailFolders/deleteditems/messages", "")
 	if response.Code != http.StatusBadGateway {
 		t.Fatalf("upstream listing failure: %d %s", response.Code, response.Body.String())
 	}
 	fake.listErr = nil
 	fake.tags["id"] = []string{folderTag("Deleted Items")}
 	fake.headErr = errors.New("upstream headers failed")
-	response = deletedItemsRequest(h, http.MethodGet, "/v1.0/users/box@example.test/mailFolders/deleteditems/messages", "")
+	response = authorizedRequest(h, http.MethodGet, "/v1.0/users/box@example.test/mailFolders/deleteditems/messages", "")
 	if response.Code != http.StatusBadGateway {
 		t.Fatalf("upstream headers failure: %d %s", response.Code, response.Body.String())
 	}
@@ -259,15 +259,15 @@ func TestDeletedItemsIncomingAndOutgoingReadStateAndNoPermanentDelete(t *testing
 		fake.messages[1].From = mailpit.Address{Address: "box@example.test"}
 		h := New(fake, Config{Token: "secret"}).Handler()
 		for _, id := range []string{"incoming", "outgoing"} {
-			moved := deletedItemsRequest(h, http.MethodPost, "/v1.0/users/box@example.test/messages/"+id+"/move", "{\"destinationId\":\"deleteditems\"}")
+			moved := authorizedRequest(h, http.MethodPost, "/v1.0/users/box@example.test/messages/"+id+"/move", "{\"destinationId\":\"deleteditems\"}")
 			if moved.Code != http.StatusCreated {
 				t.Fatalf("move: %d %s", moved.Code, moved.Body.String())
 			}
-			get := deletedItemsRequest(h, http.MethodGet, "/v1.0/users/box@example.test/messages/"+id+"?$select=id,parentFolderId,isRead,categories", "")
+			get := authorizedRequest(h, http.MethodGet, "/v1.0/users/box@example.test/messages/"+id+"?$select=id,parentFolderId,isRead,categories", "")
 			if get.Code != http.StatusOK || !strings.Contains(get.Body.String(), "\"parentFolderId\":\"deleteditems\"") {
 				t.Fatalf("readback: %d %s", get.Code, get.Body.String())
 			}
-			unsupported := deletedItemsRequest(h, http.MethodDelete, "/v1.0/users/box@example.test/messages/"+id, "")
+			unsupported := authorizedRequest(h, http.MethodDelete, "/v1.0/users/box@example.test/messages/"+id, "")
 			if unsupported.Code != http.StatusNotFound {
 				t.Fatal("permanent deletion unexpectedly supported")
 			}
@@ -275,11 +275,11 @@ func TestDeletedItemsIncomingAndOutgoingReadStateAndNoPermanentDelete(t *testing
 				t.Fatal("move modified read state, categories or sent a message")
 			}
 		}
-		listing := deletedItemsRequest(h, http.MethodGet, "/v1.0/users/box@example.test/mailFolders/deleteditems/messages", "")
+		listing := authorizedRequest(h, http.MethodGet, "/v1.0/users/box@example.test/mailFolders/deleteditems/messages", "")
 		if listing.Code != http.StatusOK || !strings.Contains(listing.Body.String(), "\"id\":\"incoming\"") || !strings.Contains(listing.Body.String(), "\"id\":\"outgoing\"") || strings.Contains(listing.Body.String(), "\"id\":\"unrelated\"") {
 			t.Fatalf("mailbox isolation: %d %s", listing.Code, listing.Body.String())
 		}
-		folder := deletedItemsRequest(h, http.MethodGet, "/v1.0/users/box@example.test/mailFolders/deleteditems", "")
+		folder := authorizedRequest(h, http.MethodGet, "/v1.0/users/box@example.test/mailFolders/deleteditems", "")
 		wantCount := "\"unreadItemCount\":2"
 		if read {
 			wantCount = "\"unreadItemCount\":0"

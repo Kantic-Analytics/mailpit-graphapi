@@ -25,6 +25,10 @@ email to the internet.
 - stores Graph state only in readable ASCII tags such as
   `Categorie - A traiter par un humain` and `Dossier - SAV`;
 - captures Graph `sendMail`, threaded reply calls and draft creation in Mailpit;
+- simulates Graph change-notification subscriptions on a mailbox's Inbox: it
+  validates the webhook endpoint, posts a `created` notification for each new
+  Inbox message, and offers test-only routes to drop notifications or fire
+  lifecycle events;
 - never contacts Microsoft Graph and never relays mail itself.
 
 Mailpit does not currently expose an in-process plugin API. This project is
@@ -74,14 +78,19 @@ Flags have equivalent environment variables:
 | `--client-id` | `MAILPIT_GRAPH_CLIENT_ID` | optional required client ID |
 | `--client-secret` | `MAILPIT_GRAPH_CLIENT_SECRET` | optional required client secret |
 | `--folders` | `MAILPIT_GRAPH_FOLDERS` | comma-separated direct children of Inbox |
+| `--notification-poll-interval` | `MAILPIT_GRAPH_NOTIFICATION_POLL_INTERVAL` | how often Mailpit is polled for new Inbox messages while a subscription is active (Go duration, default `1s`) |
+| `--allow-remote-notification-urls` | `MAILPIT_GRAPH_ALLOW_REMOTE_NOTIFICATION_URLS` | accept non-loopback subscription notification URLs (default `false`) |
 
 Remote Mailpit URLs are rejected by default. For an isolated container network,
-pass `--allow-remote-mailpit` explicitly.
+pass `--allow-remote-mailpit` explicitly. Subscription notification URLs follow
+the same rule: pass `--allow-remote-notification-urls` when the application
+receiving them runs in another container.
 
 ## Supported Graph routes
 
 See [docs/compatibility.md](docs/compatibility.md) for exact routes, mappings and
-known differences from Microsoft Graph.
+known differences from Microsoft Graph, including subscriptions and their
+test-only routes.
 
 ## Docker
 

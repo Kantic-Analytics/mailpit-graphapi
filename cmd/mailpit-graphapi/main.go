@@ -6,16 +6,16 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
-	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/Kantic-Analytics/mailpit-graphapi/internal/graphapi"
+	"github.com/Kantic-Analytics/mailpit-graphapi/internal/loopback"
 	"github.com/Kantic-Analytics/mailpit-graphapi/internal/mailpit"
 )
 
@@ -28,6 +28,8 @@ func main() {
 	clientID := flag.String("client-id", env("MAILPIT_GRAPH_CLIENT_ID", ""), "optional OAuth client ID")
 	clientSecret := flag.String("client-secret", env("MAILPIT_GRAPH_CLIENT_SECRET", ""), "optional OAuth client secret")
 	folders := flag.String("folders", env("MAILPIT_GRAPH_FOLDERS", ""), "comma-separated custom mail folders")
+	pollInterval := flag.Duration("notification-poll-interval", envDuration("MAILPIT_GRAPH_NOTIFICATION_POLL_INTERVAL", time.Second), "Mailpit polling interval while subscriptions are active")
+	allowRemoteHooks := flag.Bool("allow-remote-notification-urls", envBool("MAILPIT_GRAPH_ALLOW_REMOTE_NOTIFICATION_URLS"), "allow non-loopback subscription notification URLs (needed for containers)")
 	allowRemote := flag.Bool("allow-remote-mailpit", false, "allow a non-loopback Mailpit URL (needed for containers)")
 	showVersion := flag.Bool("version", false, "print version")
 	flag.Parse()
@@ -39,7 +41,10 @@ func main() {
 	if *token == "" {
 		fatal("MAILPIT_GRAPH_TOKEN must not be empty")
 	}
-	if !*allowRemote && !isLoopbackURL(*mailpitURL) {
+	if *pollInterval <= 0 {
+		fatal("notification poll interval must be positive")
+	}
+	if !*allowRemote && !loopback.IsHTTPURL(*mailpitURL) {
 		fatal("Mailpit URL must be loopback; pass --allow-remote-mailpit explicitly for an isolated container network")
 	}
 
@@ -55,12 +60,13 @@ func main() {
 	} else {
 		slog.Info("Mailpit display tags reconciled", "messages_updated", updated)
 	}
-	handler := graphapi.New(mp, graphapi.Config{
+	server := graphapi.New(mp, graphapi.Config{
 		Token: *token, ClientID: *clientID, ClientSecret: *clientSecret, Folders: splitCSV(*folders),
-	}).Handler()
+		NotificationPollInterval: *pollInterval, AllowRemoteNotificationURLs: *allowRemoteHooks,
+	})
 	srv := &http.Server{
 		Addr:              *listen,
-		Handler:           handler,
+		Handler:           server.Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,
@@ -69,6 +75,7 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	go server.RunNotifications(ctx)
 	go func() {
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -89,6 +96,30 @@ func env(name, fallback string) string {
 	return fallback
 }
 
+func envDuration(name string, fallback time.Duration) time.Duration {
+	value, ok := os.LookupEnv(name)
+	if !ok {
+		return fallback
+	}
+	duration, err := time.ParseDuration(value)
+	if err != nil {
+		fatal(name + " must be a Go duration such as 1s")
+	}
+	return duration
+}
+
+func envBool(name string) bool {
+	value, ok := os.LookupEnv(name)
+	if !ok {
+		return false
+	}
+	enabled, err := strconv.ParseBool(value)
+	if err != nil {
+		fatal(name + " must be true or false")
+	}
+	return enabled
+}
+
 func splitCSV(raw string) []string {
 	var out []string
 	for _, value := range strings.Split(raw, ",") {
@@ -97,19 +128,6 @@ func splitCSV(raw string) []string {
 		}
 	}
 	return out
-}
-
-func isLoopbackURL(raw string) bool {
-	u, err := url.Parse(raw)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
-		return false
-	}
-	host := u.Hostname()
-	if strings.EqualFold(host, "localhost") {
-		return true
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
 }
 
 func fatal(message string) {
