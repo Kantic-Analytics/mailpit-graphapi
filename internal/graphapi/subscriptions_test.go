@@ -112,6 +112,7 @@ type hookReceiver struct {
 	mu               sync.Mutex
 	mode             string
 	notifyStatus     int
+	onNotify         func()
 	validationTokens []validationRequest
 	bodies           [][]byte
 }
@@ -132,6 +133,12 @@ func (h *hookReceiver) setMode(mode string) {
 	h.mode = mode
 }
 
+func (h *hookReceiver) setOnNotify(fn func()) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.onNotify = fn
+}
+
 func (h *hookReceiver) setNotifyStatus(status int) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -145,7 +152,11 @@ func (h *hookReceiver) serve(w http.ResponseWriter, r *http.Request) {
 		h.mu.Lock()
 		h.bodies = append(h.bodies, body)
 		status := h.notifyStatus
+		onNotify := h.onNotify
 		h.mu.Unlock()
+		if onNotify != nil {
+			onNotify()
+		}
 		select {
 		case h.signal <- struct{}{}:
 		default:
@@ -443,6 +454,51 @@ func TestCreateSubscriptionAcceptsExpirationAtLifetimeLimit(t *testing.T) {
 	assertStatus(t, w, http.StatusCreated)
 }
 
+func TestCreateSubscriptionAcceptsClientStateAtLimit(t *testing.T) {
+	_, h, _ := newSubscriptionServer(t, &subscriptionMailpit{})
+	receiver := newHookReceiver(t)
+	fields := createFields(receiver.URL(), "", testStart.Add(time.Hour))
+	fields["clientState"] = strings.Repeat("é", 128)
+	w := authorizedRequest(h, http.MethodPost, "/v1.0/subscriptions", jsonBody(fields))
+	assertStatus(t, w, http.StatusCreated)
+}
+
+func TestCreateSubscriptionKeepsNotificationURLQueryOnValidation(t *testing.T) {
+	cases := []struct {
+		name, query, wantPrefix string
+	}{
+		{"no query", "", "validationToken="},
+		{"existing pairs kept verbatim", "b=2&a=1&flag", "b=2&a=1&flag&validationToken="},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var mu sync.Mutex
+			var rawQuery string
+			receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				token := r.URL.Query().Get("validationToken")
+				mu.Lock()
+				rawQuery = r.URL.RawQuery
+				mu.Unlock()
+				w.Header().Set("Content-Type", "text/plain")
+				_, _ = io.WriteString(w, token)
+			}))
+			t.Cleanup(receiver.Close)
+			_, h, _ := newSubscriptionServer(t, &subscriptionMailpit{})
+			notifyURL := receiver.URL + "/hook"
+			if tc.query != "" {
+				notifyURL += "?" + tc.query
+			}
+			w := authorizedRequest(h, http.MethodPost, "/v1.0/subscriptions", createBody(notifyURL, "", testStart.Add(time.Hour)))
+			assertStatus(t, w, http.StatusCreated)
+			mu.Lock()
+			defer mu.Unlock()
+			if !strings.HasPrefix(rawQuery, tc.wantPrefix) {
+				t.Fatalf("validation query = %q, want prefix %q", rawQuery, tc.wantPrefix)
+			}
+		})
+	}
+}
+
 func TestCreateSubscriptionAllowsRemoteURLsWhenOptedIn(t *testing.T) {
 	s := New(&subscriptionMailpit{}, Config{Token: "secret", AllowRemoteNotificationURLs: true})
 	s.now = (&testClock{t: testStart}).now
@@ -624,6 +680,22 @@ func TestExpiredSubscriptionStopsNotifying(t *testing.T) {
 	}
 	if fake.calls() != calls {
 		t.Fatal("Mailpit was polled with no active subscription")
+	}
+}
+
+func TestSubscriptionExpiringDuringPollStopsDelivery(t *testing.T) {
+	fake := &subscriptionMailpit{}
+	s, h, clock := newSubscriptionServer(t, fake)
+	receiver := newHookReceiver(t)
+	createTestSubscription(t, h, receiver.URL(), testStart.Add(time.Hour))
+	fake.add(inboxMessage("first", "box@example.test", testStart.Add(time.Minute)))
+	fake.add(inboxMessage("second", "box@example.test", testStart.Add(2*time.Minute)))
+	receiver.setOnNotify(func() { clock.advance(2 * time.Hour) })
+
+	s.pollOnce(context.Background())
+
+	if n := len(receiver.notifications()); n != 1 {
+		t.Fatalf("notifications = %d, want 1: the expired subscription must not deliver the second message", n)
 	}
 }
 

@@ -62,7 +62,7 @@ rejected with `409 Conflict`, as Graph rejects duplicates.
 
 While at least one subscription is active, the sidecar polls Mailpit every
 `--notification-poll-interval`. Each message that entered the subscribed Inbox
-after the subscription was created (the same matching as the Inbox listing)
+after the creation request started (the same matching as the Inbox listing)
 triggers exactly one POST of this shape to `notificationUrl`:
 
 ```json
@@ -100,7 +100,8 @@ bearer token. They let a test exercise what real Graph only does on failure.
 
 The lifecycle route answers `204` once the endpoint accepted the notification,
 `502 NotificationDeliveryFailed` if it did not, and `400 InvalidRequest` for a
-subscription created without `lifecycleNotificationUrl`.
+subscription created without `lifecycleNotificationUrl`. `subscriptionRemoved`
+deletes the subscription even when the delivery fails.
 
 ## Field mapping
 
@@ -140,6 +141,15 @@ sent through this sidecar preserve their supplied conversation ID.
   implemented.
 - Failed deliveries are not retried, where Graph retries for up to 4 hours.
   Notifications are posted one message at a time, never batched.
+- A message that was in the Inbox when the subscription was created, or was
+  already notified, is not notified again when it is moved back into the Inbox;
+  Graph posts a `created` notification for each move into the folder.
+- A message that arrives while the creation request is being processed (during
+  the validation handshake) is notified, as the baseline of existing messages is
+  taken when the request starts.
+- Deliveries are sent one at a time from the single polling goroutine, each with
+  a 3 s timeout and no retry: an endpoint that accepts the connection without
+  answering delays the notifications of every subscription.
 - Lifecycle notifications are sent only through the test-only route, never on
   their own.
 - `tenantId` is always `00000000-0000-0000-0000-000000000000`, `resource` names

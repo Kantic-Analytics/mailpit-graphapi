@@ -27,6 +27,7 @@ const maxSubscriptionLifetime = 10080 * time.Minute
 const maxClientStateLength = 128
 const simulatedTenantID = "00000000-0000-0000-0000-000000000000"
 const defaultNotificationPollInterval = time.Second
+const notificationDeliveryTimeout = 3 * time.Second
 const subscriptionEntityContext = "https://graph.microsoft.com/v1.0/$metadata#subscriptions/$entity"
 
 var inboxResource = regexp.MustCompile(`(?i)^/?users/([^/]+)/mailfolders(?:\('inbox'\)|/inbox)/messages$`)
@@ -143,11 +144,11 @@ func (st *subscriptionStore) dropNext(id string, n int) (subscription, bool) {
 	return *sub, true
 }
 
-func (st *subscriptionStore) claim(id, messageID string) bool {
+func (st *subscriptionStore) claim(id, messageID string, now time.Time) bool {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	sub, ok := st.byID[id]
-	if !ok || sub.seen[messageID] {
+	if !ok || !now.Before(sub.ExpirationDateTime) || sub.seen[messageID] {
 		return false
 	}
 	sub.seen[messageID] = true
@@ -221,7 +222,10 @@ func (s *Server) pollOnce(ctx context.Context) {
 		}
 		sort.SliceStable(inbox, func(i, j int) bool { return inbox[i].Created.Before(inbox[j].Created) })
 		for _, m := range inbox {
-			if !s.subs.claim(sub.ID, m.ID) {
+			if ctx.Err() != nil {
+				return
+			}
+			if !s.subs.claim(sub.ID, m.ID, s.now()) {
 				continue
 			}
 			err := s.postNotification(ctx, sub.NotificationURL, notificationCollection[changeNotification]{
@@ -240,7 +244,7 @@ func (s *Server) postNotification(ctx context.Context, rawURL string, payload an
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(ctx, s.deliveryTimeout)
+	ctx, cancel := context.WithTimeout(ctx, notificationDeliveryTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, rawURL, bytes.NewReader(body))
 	if err != nil {
@@ -265,9 +269,12 @@ func (s *Server) validateEndpoint(ctx context.Context, rawURL string) error {
 	if err != nil {
 		return err
 	}
-	query := u.Query()
-	query.Set("validationToken", token)
-	u.RawQuery = query.Encode()
+	validation := "validationToken=" + url.QueryEscape(token)
+	if u.RawQuery == "" {
+		u.RawQuery = validation
+	} else {
+		u.RawQuery += "&" + validation
+	}
 	ctx, cancel := context.WithTimeout(ctx, s.validationTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), http.NoBody)

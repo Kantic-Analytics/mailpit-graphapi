@@ -64,7 +64,6 @@ type Server struct {
 	allowRemoteHooks  bool
 	now               func() time.Time
 	validationTimeout time.Duration
-	deliveryTimeout   time.Duration
 }
 
 func New(mp Mailpit, cfg Config) *Server {
@@ -82,7 +81,7 @@ func New(mp Mailpit, cfg Config) *Server {
 		folders: normalizedCustomFolders(cfg.Folders), log: logger,
 		subs: newSubscriptionStore(), outbound: outbound, pollInterval: pollInterval,
 		allowRemoteHooks: cfg.AllowRemoteNotificationURLs, now: time.Now,
-		validationTimeout: 10 * time.Second, deliveryTimeout: 3 * time.Second}
+		validationTimeout: 10 * time.Second}
 }
 
 // ReconcileDisplayTags upgrades messages created by older sidecar versions.
@@ -134,15 +133,13 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		s.tokenEndpoint(w, r)
 		return
 	}
-	if strings.HasPrefix(r.URL.Path, "/local/") {
-		if !s.authorized(r) {
-			graphError(w, http.StatusUnauthorized, "InvalidAuthenticationToken", "Access token is missing or invalid")
-			return
-		}
-		s.local(w, r)
-		return
-	}
-	if !strings.HasPrefix(r.URL.Path, "/v1.0/") {
+	var handler func(http.ResponseWriter, *http.Request)
+	switch {
+	case strings.HasPrefix(r.URL.Path, "/local/"):
+		handler = s.local
+	case strings.HasPrefix(r.URL.Path, "/v1.0/"):
+		handler = s.graph
+	default:
 		graphError(w, http.StatusNotFound, "Request_ResourceNotFound", "Unknown endpoint")
 		return
 	}
@@ -150,7 +147,7 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		graphError(w, http.StatusUnauthorized, "InvalidAuthenticationToken", "Access token is missing or invalid")
 		return
 	}
-	s.graph(w, r)
+	handler(w, r)
 }
 
 func (s *Server) tokenEndpoint(w http.ResponseWriter, r *http.Request) {
