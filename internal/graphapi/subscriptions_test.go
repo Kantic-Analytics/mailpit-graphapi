@@ -113,6 +113,7 @@ type hookReceiver struct {
 	mode             string
 	notifyStatus     int
 	onNotify         func()
+	onValidate       func()
 	validationTokens []validationRequest
 	bodies           [][]byte
 }
@@ -137,6 +138,12 @@ func (h *hookReceiver) setOnNotify(fn func()) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.onNotify = fn
+}
+
+func (h *hookReceiver) setOnValidate(fn func()) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.onValidate = fn
 }
 
 func (h *hookReceiver) setNotifyStatus(status int) {
@@ -166,8 +173,12 @@ func (h *hookReceiver) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	h.mu.Lock()
 	mode := h.mode
+	onValidate := h.onValidate
 	h.validationTokens = append(h.validationTokens, validationRequest{token: token, contentType: r.Header.Get("Content-Type")})
 	h.mu.Unlock()
+	if onValidate != nil {
+		onValidate()
+	}
 	switch mode {
 	case "status500":
 		w.WriteHeader(http.StatusInternalServerError)
@@ -570,6 +581,43 @@ func TestDuplicateSubscriptionConflicts(t *testing.T) {
 
 	second := authorizedRequest(h, http.MethodPost, "/v1.0/subscriptions", body)
 	assertError(t, second, http.StatusConflict, "Conflict", created.ID)
+}
+
+func TestCreateSubscriptionRejectsExpirationPassedDuringValidation(t *testing.T) {
+	_, h, clock := newSubscriptionServer(t, &subscriptionMailpit{})
+	receiver := newHookReceiver(t)
+	receiver.setOnValidate(func() { clock.advance(2 * time.Minute) })
+
+	w := authorizedRequest(h, http.MethodPost, "/v1.0/subscriptions", createBody(receiver.URL(), "", testStart.Add(time.Minute)))
+	assertError(t, w, http.StatusBadRequest, "InvalidRequest", "expirationDateTime must be in the future")
+
+	var listed struct {
+		Value []subscriptionResponse `json:"value"`
+	}
+	decodeResponse(t, authorizedRequest(h, http.MethodGet, "/v1.0/subscriptions", ""), &listed)
+	if len(listed.Value) != 0 {
+		t.Fatalf("list = %+v, want empty", listed.Value)
+	}
+}
+
+func TestCreateSubscriptionReplacesOneExpiredDuringValidation(t *testing.T) {
+	_, h, clock := newSubscriptionServer(t, &subscriptionMailpit{})
+	receiver := newHookReceiver(t)
+	old := createTestSubscription(t, h, receiver.URL(), testStart.Add(time.Minute))
+	receiver.setOnValidate(func() { clock.advance(2 * time.Minute) })
+
+	w := authorizedRequest(h, http.MethodPost, "/v1.0/subscriptions", createBody(receiver.URL(), "", testStart.Add(time.Hour)))
+	assertStatus(t, w, http.StatusCreated)
+	var created subscriptionResponse
+	decodeResponse(t, w, &created)
+
+	var listed struct {
+		Value []subscriptionResponse `json:"value"`
+	}
+	decodeResponse(t, authorizedRequest(h, http.MethodGet, "/v1.0/subscriptions", ""), &listed)
+	if len(listed.Value) != 1 || listed.Value[0].ID != created.ID || created.ID == old {
+		t.Fatalf("list = %+v, want only the new subscription", listed.Value)
+	}
 }
 
 func TestNotifiesOnceForNewInboxMessages(t *testing.T) {

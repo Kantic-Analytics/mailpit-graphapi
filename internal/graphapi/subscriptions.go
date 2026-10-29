@@ -29,6 +29,7 @@ const simulatedTenantID = "00000000-0000-0000-0000-000000000000"
 const defaultNotificationPollInterval = time.Second
 const notificationDeliveryTimeout = 3 * time.Second
 const subscriptionEntityContext = "https://graph.microsoft.com/v1.0/$metadata#subscriptions/$entity"
+const expirationNotInFuture = "expirationDateTime must be in the future"
 
 var inboxResource = regexp.MustCompile(`(?i)^/?users/([^/]+)/mailfolders(?:\('inbox'\)|/inbox)/messages$`)
 
@@ -42,6 +43,8 @@ type subscription struct {
 	seen                                                                          map[string]bool
 	pendingDrops, delivered, failed, dropped                                      int
 }
+
+var errSubscriptionExpired = errors.New("subscription expired before it was stored")
 
 type subscriptionStore struct {
 	mu   sync.Mutex
@@ -57,6 +60,10 @@ func newSubscriptionStore() *subscriptionStore {
 func (st *subscriptionStore) prune(now time.Time) []string {
 	st.mu.Lock()
 	defer st.mu.Unlock()
+	return st.pruneLocked(now)
+}
+
+func (st *subscriptionStore) pruneLocked(now time.Time) []string {
 	var expired []string
 	for id, sub := range st.byID {
 		if !now.Before(sub.ExpirationDateTime) {
@@ -73,12 +80,19 @@ func (st *subscriptionStore) active() bool {
 	return len(st.byID) > 0
 }
 
-func (st *subscriptionStore) add(sub *subscription) (conflictID string) {
+// add stores sub unless it has already expired at now or duplicates an active
+// subscription. Subscriptions expired at now are dropped first and returned, so
+// one that lapsed during the creation request does not cause a conflict.
+func (st *subscriptionStore) add(sub *subscription, now time.Time) (expired []string, conflictID string, err error) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
+	expired = st.pruneLocked(now)
+	if !now.Before(sub.ExpirationDateTime) {
+		return expired, "", errSubscriptionExpired
+	}
 	for _, existing := range st.byID {
 		if strings.EqualFold(existing.Mailbox, sub.Mailbox) && existing.ChangeType == sub.ChangeType {
-			return existing.ID
+			return expired, existing.ID, nil
 		}
 	}
 	sub.seq = st.next
@@ -88,7 +102,7 @@ func (st *subscriptionStore) add(sub *subscription) (conflictID string) {
 	case st.wake <- struct{}{}:
 	default:
 	}
-	return ""
+	return expired, "", nil
 }
 
 func (st *subscriptionStore) get(id string) (subscription, bool) {
@@ -175,7 +189,11 @@ func (st *subscriptionStore) recordDelivery(id string, ok bool) {
 }
 
 func (s *Server) pruneExpired() {
-	for _, id := range s.subs.prune(s.now()) {
+	s.logExpired(s.subs.prune(s.now()))
+}
+
+func (s *Server) logExpired(ids []string) {
+	for _, id := range ids {
 		s.log.Info("Subscription expired", "subscription", id)
 	}
 }
@@ -348,7 +366,7 @@ func (s *Server) parseExpiration(raw string) (time.Time, string) {
 	}
 	now := s.now()
 	if !exp.After(now) {
-		return time.Time{}, "expirationDateTime must be in the future"
+		return time.Time{}, expirationNotInFuture
 	}
 	if exp.After(now.Add(maxSubscriptionLifetime)) {
 		return time.Time{}, "Subscription expiration can only be 10080 minutes in the future."
@@ -563,7 +581,13 @@ func (s *Server) createSubscription(w http.ResponseWriter, r *http.Request) {
 		seen:                      seen,
 	}
 	body := s.subscriptionJSON(*sub, subscriptionEntityContext)
-	if conflict := s.subs.add(sub); conflict != "" {
+	expired, conflict, err := s.subs.add(sub, s.now())
+	s.logExpired(expired)
+	if err != nil {
+		invalidRequest(w, expirationNotInFuture)
+		return
+	}
+	if conflict != "" {
 		graphError(w, http.StatusConflict, "Conflict", "Subscription Id "+conflict+" already exists for the requested combination")
 		return
 	}

@@ -55,7 +55,8 @@ Creating a subscription follows Graph's handshake: the sidecar POSTs to
 set, and each must answer within 10 seconds with `200 OK`, a `text/plain` body
 and the URL-decoded token. Otherwise creation fails with `400 InvalidRequest`.
 `expirationDateTime` is required, must be in the future and at most 10080
-minutes ahead; `PATCH` renews it. An expired subscription is dropped and stops
+minutes ahead; one that passes during the handshake fails creation with
+`400 InvalidRequest` too. `PATCH` renews it. An expired subscription is dropped and stops
 notifying. `clientState` is limited to 128 characters and echoed in every
 notification. A second subscription with the same mailbox and change type is
 rejected with `409 Conflict`, as Graph rejects duplicates.
