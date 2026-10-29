@@ -6,9 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
-	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -16,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Kantic-Analytics/mailpit-graphapi/internal/graphapi"
+	"github.com/Kantic-Analytics/mailpit-graphapi/internal/loopback"
 	"github.com/Kantic-Analytics/mailpit-graphapi/internal/mailpit"
 )
 
@@ -39,7 +38,7 @@ func main() {
 	if *token == "" {
 		fatal("MAILPIT_GRAPH_TOKEN must not be empty")
 	}
-	if !*allowRemote && !isLoopbackURL(*mailpitURL) {
+	if !*allowRemote && !loopback.IsHTTPURL(*mailpitURL) {
 		fatal("Mailpit URL must be loopback; pass --allow-remote-mailpit explicitly for an isolated container network")
 	}
 
@@ -97,19 +96,6 @@ func splitCSV(raw string) []string {
 		}
 	}
 	return out
-}
-
-func isLoopbackURL(raw string) bool {
-	u, err := url.Parse(raw)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
-		return false
-	}
-	host := u.Hostname()
-	if strings.EqualFold(host, "localhost") {
-		return true
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
 }
 
 func fatal(message string) {

@@ -327,7 +327,7 @@ func (s *Server) list(w http.ResponseWriter, r *http.Request, mailbox, folder st
 			return
 		}
 	}
-	all, err := s.allMessages(r)
+	all, err := s.allMessages(r.Context())
 	if err != nil {
 		s.upstreamError(w, err)
 		return
@@ -383,11 +383,11 @@ func (s *Server) list(w http.ResponseWriter, r *http.Request, mailbox, folder st
 	writeJSON(w, http.StatusOK, response)
 }
 
-func (s *Server) allMessages(r *http.Request) ([]mailpit.MessageSummary, error) {
+func (s *Server) allMessages(ctx context.Context) ([]mailpit.MessageSummary, error) {
 	const pageSize = 1000
 	var out []mailpit.MessageSummary
 	for start := 0; ; start += pageSize {
-		page, err := s.mp.List(r.Context(), start, pageSize)
+		page, err := s.mp.List(ctx, start, pageSize)
 		if err != nil {
 			return nil, err
 		}
@@ -426,7 +426,7 @@ func (s *Server) get(w http.ResponseWriter, r *http.Request, id string) {
 }
 
 func (s *Server) findSummary(r *http.Request, id string) (mailpit.MessageSummary, error) {
-	all, err := s.allMessages(r)
+	all, err := s.allMessages(r.Context())
 	if err != nil {
 		return mailpit.MessageSummary{}, err
 	}
