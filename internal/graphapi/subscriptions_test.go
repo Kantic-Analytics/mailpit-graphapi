@@ -816,6 +816,44 @@ func TestRenewSubscription(t *testing.T) {
 	assertStatus(t, authorizedRequest(h, http.MethodPatch, "/v1.0/subscriptions/unknown", missing), http.StatusNotFound)
 }
 
+// readHook runs onRead once, when the request body is first read.
+type readHook struct {
+	io.Reader
+	onRead func()
+}
+
+func (h *readHook) Read(p []byte) (int, error) {
+	if h.onRead != nil {
+		h.onRead()
+		h.onRead = nil
+	}
+	return h.Reader.Read(p)
+}
+
+func TestRenewRejectsSubscriptionExpiredDuringRequest(t *testing.T) {
+	_, h, clock := newSubscriptionServer(t, &subscriptionMailpit{})
+	receiver := newHookReceiver(t)
+	id := createTestSubscription(t, h, receiver.URL(), testStart.Add(time.Hour))
+	path := "/v1.0/subscriptions/" + id
+	body := jsonBody(map[string]any{"expirationDateTime": testStart.Add(3 * time.Hour).Format(time.RFC3339Nano)})
+
+	r := httptest.NewRequest(http.MethodPatch, path, &readHook{Reader: strings.NewReader(body), onRead: func() { clock.advance(2 * time.Hour) }})
+	r.Header.Set("Authorization", "Bearer secret")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+
+	assertError(t, w, http.StatusNotFound, "ResourceNotFound", "Subscription not found")
+	assertError(t, authorizedRequest(h, http.MethodPatch, "/v1.0/subscriptions/unknown", body), http.StatusNotFound, "ResourceNotFound", "Subscription not found")
+	assertStatus(t, authorizedRequest(h, http.MethodGet, path, ""), http.StatusNotFound)
+	var listed struct {
+		Value []subscriptionResponse `json:"value"`
+	}
+	decodeResponse(t, authorizedRequest(h, http.MethodGet, "/v1.0/subscriptions", ""), &listed)
+	if len(listed.Value) != 0 {
+		t.Fatalf("list after expiry = %+v, want empty", listed.Value)
+	}
+}
+
 func TestDeleteSubscription(t *testing.T) {
 	fake := &subscriptionMailpit{}
 	s, h, _ := newSubscriptionServer(t, fake)

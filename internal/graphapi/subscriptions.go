@@ -127,15 +127,19 @@ func (st *subscriptionStore) list() []subscription {
 	return out
 }
 
-func (st *subscriptionStore) renew(id string, exp time.Time) (subscription, bool) {
+// renew sets exp on subscription id unless it has expired at now.
+// Subscriptions expired at now are dropped first and returned, so one that
+// lapsed during the renewal request is not revived.
+func (st *subscriptionStore) renew(id string, exp, now time.Time) (sub subscription, expired []string, ok bool) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	sub, ok := st.byID[id]
+	expired = st.pruneLocked(now)
+	stored, ok := st.byID[id]
 	if !ok {
-		return subscription{}, false
+		return subscription{}, expired, false
 	}
-	sub.ExpirationDateTime = exp
-	return *sub, true
+	stored.ExpirationDateTime = exp
+	return *stored, expired, true
 }
 
 func (st *subscriptionStore) remove(id string) bool {
@@ -659,7 +663,8 @@ func (s *Server) renewSubscription(w http.ResponseWriter, r *http.Request, id st
 		invalidRequest(w, msg)
 		return
 	}
-	sub, ok := s.subs.renew(id, exp)
+	sub, expired, ok := s.subs.renew(id, exp, s.now())
+	s.logExpired(expired)
 	if !ok {
 		subscriptionNotFound(w)
 		return
