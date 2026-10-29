@@ -41,11 +41,13 @@ type Mailpit interface {
 }
 
 type Config struct {
-	Token        string
-	ClientID     string
-	ClientSecret string
-	Folders      []string
-	Logger       *slog.Logger
+	Token                       string
+	ClientID                    string
+	ClientSecret                string
+	Folders                     []string
+	Logger                      *slog.Logger
+	NotificationPollInterval    time.Duration
+	AllowRemoteNotificationURLs bool
 }
 
 type Server struct {
@@ -55,6 +57,14 @@ type Server struct {
 	secret  string
 	folders []string
 	log     *slog.Logger
+
+	subs              *subscriptionStore
+	outbound          *http.Client
+	pollInterval      time.Duration
+	allowRemoteHooks  bool
+	now               func() time.Time
+	validationTimeout time.Duration
+	deliveryTimeout   time.Duration
 }
 
 func New(mp Mailpit, cfg Config) *Server {
@@ -62,8 +72,17 @@ func New(mp Mailpit, cfg Config) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
+	pollInterval := cfg.NotificationPollInterval
+	if pollInterval <= 0 {
+		pollInterval = defaultNotificationPollInterval
+	}
+	// Redirects are not followed, so a redirect cannot bypass the loopback check on notification URLs.
+	outbound := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	return &Server{mp: mp, token: cfg.Token, client: cfg.ClientID, secret: cfg.ClientSecret,
-		folders: normalizedCustomFolders(cfg.Folders), log: logger}
+		folders: normalizedCustomFolders(cfg.Folders), log: logger,
+		subs: newSubscriptionStore(), outbound: outbound, pollInterval: pollInterval,
+		allowRemoteHooks: cfg.AllowRemoteNotificationURLs, now: time.Now,
+		validationTimeout: 10 * time.Second, deliveryTimeout: 3 * time.Second}
 }
 
 // ReconcileDisplayTags upgrades messages created by older sidecar versions.
@@ -115,6 +134,14 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		s.tokenEndpoint(w, r)
 		return
 	}
+	if strings.HasPrefix(r.URL.Path, "/local/") {
+		if !s.authorized(r) {
+			graphError(w, http.StatusUnauthorized, "InvalidAuthenticationToken", "Access token is missing or invalid")
+			return
+		}
+		s.local(w, r)
+		return
+	}
 	if !strings.HasPrefix(r.URL.Path, "/v1.0/") {
 		graphError(w, http.StatusNotFound, "Request_ResourceNotFound", "Unknown endpoint")
 		return
@@ -153,6 +180,10 @@ func secureEqual(a, b string) bool {
 
 func (s *Server) graph(w http.ResponseWriter, r *http.Request) {
 	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	if len(parts) >= 2 && parts[0] == "v1.0" && parts[1] == "subscriptions" {
+		s.subscriptions(w, r, parts[2:])
+		return
+	}
 	if len(parts) < 3 || parts[0] != "v1.0" || parts[1] != "users" {
 		graphError(w, http.StatusNotFound, "Request_ResourceNotFound", "Unknown endpoint")
 		return
