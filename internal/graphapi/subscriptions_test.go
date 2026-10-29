@@ -1,12 +1,15 @@
 package graphapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -79,6 +82,24 @@ func inboxMessage(id, mailbox string, created time.Time) mailpit.MessageSummary 
 		From: mailpit.Address{Address: "sender@example.test"},
 		To:   []mailpit.Address{{Address: mailbox}}, Subject: id, Created: created,
 	}
+}
+
+// logSink collects the server's log output so tests can assert on it.
+type logSink struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (l *logSink) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buf.Write(p)
+}
+
+func (l *logSink) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buf.String()
 }
 
 type testClock struct {
@@ -219,11 +240,18 @@ func (h *hookReceiver) waitNotification(t *testing.T) {
 
 func newSubscriptionServer(t *testing.T, fake *subscriptionMailpit) (*Server, http.Handler, *testClock) {
 	t.Helper()
+	s, h, clock, _ := newLoggedSubscriptionServer(t, fake)
+	return s, h, clock
+}
+
+func newLoggedSubscriptionServer(t *testing.T, fake *subscriptionMailpit) (*Server, http.Handler, *testClock, *logSink) {
+	t.Helper()
 	clock := &testClock{t: testStart}
-	s := New(fake, Config{Token: "secret", ClientID: "app-id"})
+	logs := &logSink{}
+	s := New(fake, Config{Token: "secret", ClientID: "app-id", Logger: slog.New(slog.NewTextHandler(logs, nil))})
 	s.now = clock.now
 	s.validationTimeout = 50 * time.Millisecond
-	return s, s.Handler(), clock
+	return s, s.Handler(), clock, logs
 }
 
 func createFields(notifyURL, lifecycleURL string, exp time.Time) map[string]any {
@@ -923,6 +951,97 @@ func TestLifecycleNotifications(t *testing.T) {
 		assertStatus(t, authorizedRequest(h, http.MethodPost, "/local/subscriptions/unknown/lifecycleNotifications",
 			`{"lifecycleEvent":"missed"}`), http.StatusNotFound)
 	})
+}
+
+func TestWebhookFailuresKeepURLSecretsOutOfLogs(t *testing.T) {
+	const secret = "s3cr3t-query-token"
+	withSecret := func(u string) string { return u + "?code=" + secret }
+	type env struct {
+		s                 *Server
+		h                 http.Handler
+		fake              *subscriptionMailpit
+		notify, lifecycle *hookReceiver
+	}
+	create := func(t *testing.T, e env) *httptest.ResponseRecorder {
+		t.Helper()
+		return authorizedRequest(e.h, http.MethodPost, "/v1.0/subscriptions",
+			createBody(withSecret(e.notify.URL()), withSecret(e.lifecycle.URL()), testStart.Add(time.Hour)))
+	}
+	createOK := func(t *testing.T, e env) string {
+		t.Helper()
+		w := create(t, e)
+		assertStatus(t, w, http.StatusCreated)
+		var created subscriptionResponse
+		decodeResponse(t, w, &created)
+		return created.ID
+	}
+	deliver := func(t *testing.T, e env, breakHook func()) *httptest.ResponseRecorder {
+		t.Helper()
+		createOK(t, e)
+		breakHook()
+		e.fake.add(inboxMessage("new", "box@example.test", testStart.Add(time.Minute)))
+		e.s.pollOnce(context.Background())
+		return nil
+	}
+	lifecycle := func(t *testing.T, e env, breakHook func()) *httptest.ResponseRecorder {
+		t.Helper()
+		id := createOK(t, e)
+		breakHook()
+		return authorizedRequest(e.h, http.MethodPost, "/local/subscriptions/"+id+"/lifecycleNotifications", `{"lifecycleEvent":"missed"}`)
+	}
+	cases := []struct {
+		name, want string
+		run        func(*testing.T, env) *httptest.ResponseRecorder
+	}{
+		{"validation status", "unexpected status 500", func(t *testing.T, e env) *httptest.ResponseRecorder {
+			e.notify.setMode("status500")
+			return create(t, e)
+		}},
+		{"validation timeout", "timeout", func(t *testing.T, e env) *httptest.ResponseRecorder {
+			e.notify.setMode("hang")
+			return create(t, e)
+		}},
+		{"validation connection failed", "connection failed", func(t *testing.T, e env) *httptest.ResponseRecorder {
+			e.notify.server.Close()
+			return create(t, e)
+		}},
+		{"lifecycle validation status", "unexpected status 500", func(t *testing.T, e env) *httptest.ResponseRecorder {
+			e.lifecycle.setMode("status500")
+			return create(t, e)
+		}},
+		{"notification status", "unexpected status 500", func(t *testing.T, e env) *httptest.ResponseRecorder {
+			return deliver(t, e, func() { e.notify.setNotifyStatus(http.StatusInternalServerError) })
+		}},
+		{"notification connection failed", "connection failed", func(t *testing.T, e env) *httptest.ResponseRecorder {
+			return deliver(t, e, e.notify.server.Close)
+		}},
+		{"lifecycle status", "unexpected status 500", func(t *testing.T, e env) *httptest.ResponseRecorder {
+			return lifecycle(t, e, func() { e.lifecycle.setNotifyStatus(http.StatusInternalServerError) })
+		}},
+		{"lifecycle connection failed", "connection failed", func(t *testing.T, e env) *httptest.ResponseRecorder {
+			return lifecycle(t, e, e.lifecycle.server.Close)
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &subscriptionMailpit{}
+			s, h, _, logs := newLoggedSubscriptionServer(t, fake)
+			w := tc.run(t, env{s: s, h: h, fake: fake, notify: newHookReceiver(t), lifecycle: newHookReceiver(t)})
+			if w != nil && w.Code < 400 {
+				t.Fatalf("status = %d, want a failure", w.Code)
+			}
+			if w != nil && strings.Contains(w.Body.String(), secret) {
+				t.Fatalf("response leaks the URL secret: %s", w.Body.String())
+			}
+			out := logs.String()
+			if strings.Contains(out, secret) {
+				t.Fatalf("logs leak the URL secret:\n%s", out)
+			}
+			if !strings.Contains(out, "error="+strconv.Quote(tc.want)) && !strings.Contains(out, "error="+tc.want) {
+				t.Fatalf("logs lack error class %q:\n%s", tc.want, out)
+			}
+		})
+	}
 }
 
 func TestRunNotificationsPollsOnlyWhileSubscribed(t *testing.T) {

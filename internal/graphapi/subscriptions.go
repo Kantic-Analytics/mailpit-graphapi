@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"mime"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -257,6 +258,34 @@ func (s *Server) pollOnce(ctx context.Context) {
 	}
 }
 
+// Webhook calls fail with one of these classes, never the transport error,
+// whose text quotes the URL and any secret its query carries.
+var (
+	errHookTimeout       = errors.New("timeout")
+	errHookCanceled      = errors.New("canceled")
+	errHookUnreachable   = errors.New("connection failed")
+	errHookInvalidURL    = errors.New("invalid URL")
+	errHookNotTextPlain  = errors.New("validation response is not text/plain")
+	errHookTokenMismatch = errors.New("validation response does not echo the token")
+)
+
+type hookStatusError struct{ status int }
+
+func (e hookStatusError) Error() string { return fmt.Sprintf("unexpected status %d", e.status) }
+
+// hookFailure classifies an error from sending a webhook request or reading its response.
+func hookFailure(err error) error {
+	var netErr net.Error
+	switch {
+	case errors.As(err, &netErr) && netErr.Timeout():
+		return errHookTimeout
+	case errors.Is(err, context.Canceled):
+		return errHookCanceled
+	default:
+		return errHookUnreachable
+	}
+}
+
 func (s *Server) postNotification(ctx context.Context, rawURL string, payload any) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -266,17 +295,17 @@ func (s *Server) postNotification(ctx context.Context, rawURL string, payload an
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, rawURL, bytes.NewReader(body))
 	if err != nil {
-		return err
+		return errHookInvalidURL
 	}
 	req.Header.Set("Content-Type", "application/json; charset=utf-8")
 	resp, err := s.outbound.Do(req)
 	if err != nil {
-		return err
+		return hookFailure(err)
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return fmt.Errorf("notification endpoint returned %s", resp.Status)
+		return hookStatusError{resp.StatusCode}
 	}
 	return nil
 }
@@ -285,7 +314,7 @@ func (s *Server) validateEndpoint(ctx context.Context, rawURL string) error {
 	token := "Validation: Testing client application reachability for subscription Request-Id: " + newGUID()
 	u, err := url.Parse(rawURL)
 	if err != nil {
-		return err
+		return errHookInvalidURL
 	}
 	validation := "validationToken=" + url.QueryEscape(token)
 	if u.RawQuery == "" {
@@ -297,27 +326,27 @@ func (s *Server) validateEndpoint(ctx context.Context, rawURL string) error {
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), http.NoBody)
 	if err != nil {
-		return err
+		return errHookInvalidURL
 	}
 	req.Header.Set("Content-Type", "text/plain; charset=utf-8")
 	resp, err := s.outbound.Do(req)
 	if err != nil {
-		return err
+		return hookFailure(err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	if err != nil {
-		return err
+		return hookFailure(err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("validation endpoint returned %s", resp.Status)
+		return hookStatusError{resp.StatusCode}
 	}
 	mediaType, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
 	if err != nil || mediaType != "text/plain" {
-		return errors.New("validation response is not text/plain")
+		return errHookNotTextPlain
 	}
 	if string(body) != token {
-		return errors.New("validation response does not echo the token")
+		return errHookTokenMismatch
 	}
 	return nil
 }
@@ -559,12 +588,12 @@ func (s *Server) createSubscription(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err := s.validateEndpoint(r.Context(), input.NotificationURL); err != nil {
-		s.validationFailed(w, input.NotificationURL, err)
+		s.validationFailed(w, input.Resource, "notificationUrl", err)
 		return
 	}
 	if input.LifecycleNotificationURL != nil {
 		if err := s.validateEndpoint(r.Context(), *input.LifecycleNotificationURL); err != nil {
-			s.validationFailed(w, *input.LifecycleNotificationURL, err)
+			s.validationFailed(w, input.Resource, "lifecycleNotificationUrl", err)
 			return
 		}
 	}
@@ -595,9 +624,9 @@ func (s *Server) createSubscription(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, body)
 }
 
-func (s *Server) validationFailed(w http.ResponseWriter, endpoint string, err error) {
-	s.log.Warn("Subscription validation failed", "endpoint", endpoint, "error", err)
-	if errors.Is(err, context.DeadlineExceeded) {
+func (s *Server) validationFailed(w http.ResponseWriter, resource, field string, err error) {
+	s.log.Warn("Subscription validation failed", "resource", resource, "field", field, "error", err)
+	if errors.Is(err, errHookTimeout) {
 		invalidRequest(w, "Subscription validation request timed out.")
 		return
 	}
